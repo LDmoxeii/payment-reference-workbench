@@ -3,3 +3,13 @@
 /.comet/*
 !/.comet/config.yaml
 # <<< Comet managed project state <<<
+
+node_modules/
+dist/
+coverage/
+*.log
+.vite/
+*.tsbuildinfo
+/vite.config.js
+/vite.config.d.ts
+.idea/
