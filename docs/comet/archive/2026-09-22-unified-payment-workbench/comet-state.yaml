@@ -1,0 +1,269 @@
+schema: comet.native.v4
+name: unified-payment-workbench
+language: zh-CN
+phase: archive
+status: done
+state_version: 18
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: c5a5e85775578955df362fc10b5aad05965a01c6873970eeed30ae89099223cd
+spec_changes:
+  - capability: payment-workbench
+    operation: create
+    source: specs/payment-workbench/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 4
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 2
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: specs/payment-workbench/spec.md
+    text: 同一页面切换两个后端 - GIVEN 工作台分别使用 WOW 或 CAP4K 配置启动 - WHEN 用户进入同一组业务页面 - THEN
+      页面只调用统一服务并依据统一能力与动作声明渲染 - AND 切换后端不修改页面代码 - AND 源路径、字段、状态、金额和错误差异均由适配器处理
+    result: passed
+    reason:
+      text: 统一 PaymentBackendAdapter 与 PaymentWorkbenchService
+        隔离页面；工厂集中选择适配器，路径、字段、状态、金额、错误和能力差异均由 WOW/CAP4K 适配器封装。
+      truncated: false
+  - id: A2
+    source: specs/payment-workbench/spec.md
+    text: 创建后查看统一支付详情 - GIVEN 用户填写商户、订单号、幂等键、精确金额、币种、支付方式和可选到期时间 - WHEN
+      用户提交创建并查询返回的支付号 - THEN 页面显示统一支付详情、源状态、幂等复用结果和可执行动作 - AND 金额不经过 JavaScript
+      浮点计算 - AND 创建受理不显示为已经付款
+    result: passed
+    reason:
+      text: 统一 Payment/Money/回执模型完整，金额以字符串和 BigInt 处理；创建页展示详情、源信息、动作、幂等提示，并将受理与付款成功区分。
+      truncated: false
+  - id: A3
+    source: specs/payment-workbench/spec.md
+    text: 按当前适配器推进支付结果 - GIVEN 某支付在当前适配器下存在可执行的支付动作 - WHEN
+      用户发起尝试或通过渠道模拟提交成功、失败、未知、重复或冲突结果 - THEN 工作台按该后端实际流程执行并查询最终读模型 - AND
+      分别展示支付主状态、尝试状态、回执处置与证据 - AND 不把已受理、HTTP 2xx 或命令成功显示为支付成功
+    result: passed
+    reason:
+      text: WOW 自动尝试与结果回传、CAP4K 显式尝试与渠道结果分别由适配器实现；页面按回执刷新策略查询并展示支付、尝试和证据，轮询不把受理当终态。
+      truncated: false
+  - id: A4
+    source: specs/payment-workbench/spec.md
+    text: 创建并推进退款 - GIVEN 支付已成功且存在可退款金额 - WHEN 用户创建全额或部分退款并按当前适配器支持的方式推进结果或人工裁决 -
+      THEN 工作台显示退款状态、源状态、成功金额、占用金额、可退款金额和错误原因 - AND 可以从支付详情追踪相关退款
+    result: passed
+    reason:
+      text: 统一退款模型、预算事实、详情、结果提交及裁决均已实现；支付详情可查看成功、占用和可退款金额，适配器保留两端实际退款推进差异。
+      truncated: false
+  - id: A5
+    source: specs/payment-workbench/spec.md
+    text: 按能力操作运营流程 - GIVEN 当前适配器声明了某项对账、结算或追踪能力 - WHEN 用户按 ID
+      查询或执行重跑、处置、准备、确认、执行、结果、替代或裁决动作 - THEN 页面显示统一事实、证据、阻断原因和可执行动作 - AND
+      未支持动作明确显示待对齐原因而不发送请求
+    result: passed
+    reason:
+      text: 对账、结算与轨迹通过统一服务及能力/动作声明暴露；运营页显示事实和阻断原因，不可用动作明确说明且不会发请求。
+      truncated: false
+  - id: A6
+    source: specs/payment-workbench/spec.md
+    text: 请求失败或等待最终一致状态 - GIVEN 请求可能加载、为空、失败、冲突、未找到或最终一致收敛 - WHEN 任一情况发生 - THEN
+      页面保留输入和当前上下文 - AND 展示标准化错误码、可读消息、字段问题、可重试性及源诊断 - AND
+      异步操作明确区分受理回执、轮询状态和业务终态
+    result: passed
+    reason:
+      text: 加载、空、错误、字段问题、可重试性和源诊断展示完整；本轮将默认 fetch 绑定 globalThis，消除真实浏览器 receiver
+        错误，并由回归测试和真实 WOW 浏览器连接成功证实。
+      truncated: false
+  - id: A7
+    source: specs/payment-workbench/spec.md
+    text: 使用最近记录重新打开资源 - GIVEN 两个后端当前都没有权威支付或退款列表和分页接口 - WHEN 用户创建或成功查询业务对象 - THEN
+      工作台把其最小导航信息写入当前适配器的浏览器最近记录 - AND 用户可以再次打开或移除记录 - AND 页面明确说明它不是后端全量列表 - AND
+      统一分页契约与两端缺口出现在对齐清单中
+    result: passed
+    reason:
+      text: 统一分页契约保留，两端列表缺口明确；最近记录按适配器隔离，支持重开、单项移除和清空当前后端，页面标明不是后端全量列表。
+      truncated: false
+  - id: A8
+    source: specs/payment-workbench/spec.md
+    text: 查看可执行的后端对齐项 - GIVEN 统一业务诉求和两个后端现状存在差异 - WHEN 用户查看能力对照页或维护者阅读对齐文档 - THEN
+      能看到目标语义、WOW 现状、CAP4K 现状、工作台处理、缺失能力、建议改动和优先级 - AND
+      至少覆盖列表分页、支付发起、退款结果、对账入口、结算流程、轨迹、认证授权和浏览器接入
+    result: passed
+    reason:
+      text: 能力对照页与后端对齐文档覆盖目标、两端现状、工作台策略、建议和优先级，并包含列表分页、支付、退款、对账、结算、轨迹、认证和浏览器接入。
+      truncated: false
+  - id: A9
+    source: specs/payment-workbench/spec.md
+    text: 在不同视口完成主要操作 - GIVEN 用户在桌面或移动视口使用工作台 - WHEN 在三类业务视角间导航并提交表单 - THEN
+      页面信息层次清楚、控件不重叠且长标识可阅读 - AND 危险或不可逆动作有明确确认 - AND 加载、空、错误和成功反馈不会造成布局错乱
+    result: passed
+    reason:
+      text: 已有桌面与移动实际浏览器证据；长标识、宽表格和响应式导航有专门布局，资金及人工裁决动作统一二次确认，连接错误与成功状态布局稳定。
+      truncated: false
+  - id: A10
+    source: specs/payment-workbench/spec.md
+    text: 按文档运行两种模式 - GIVEN 开发者获得仓库 - WHEN 按 README 安装并分别运行 WOW 与 CAP4K 模式 - THEN
+      应用可以启动、构建和测试 - AND 开发代理连接对应后端 - AND README
+      说明目录、配置、切换、统一契约、业务流程、差异、限制及新增第三适配器步骤
+    result: passed
+    reason:
+      text: README 完整说明安装、两种模式、代理、配置、结构、契约、流程、差异、扩展和限制；本轮 Runtime npm run check
+        通过类型检查、6 文件 21/21 测试及生产构建。
+      truncated: false
+builder_handoff:
+  candidate_id: 4ff01f9c-2a30-45f3-b853-f162bc441fef
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:fb22f208-f660-4765-ac51-7cb5d37fc281
+  iteration: 4
+  summary:
+    text: 修复真实浏览器中的 WOW 连接误报：HttpClient 默认 fetch 现在绑定 globalThis，避免以 HttpClient
+      实例作为原生 fetch receiver 而在发请求前抛错；保留注入 fetch 的行为。新增 receiver 回归测试。已确认 8080
+      WOW actuator 健康、业务探针返回预期 404、Vite 同源代理可达，实际浏览器页面连接状态由失败恢复为成功。
+    truncated: false
+  addressed_acceptance_ids:
+    - A6
+    - A10
+  checks:
+    - name:
+        text: Focused HttpClient regression test
+        truncated: false
+      result: passed
+      note:
+        text: npm run test -- src/http/client.test.ts：1 个文件，3/3 通过。
+        truncated: false
+    - name:
+        text: Full frontend check
+        truncated: false
+      result: passed
+      note:
+        text: npm run check：TypeScript 通过，Vitest 6 个文件 21/21 通过，Vite production build
+          通过，1898 modules transformed。
+        truncated: false
+    - name:
+        text: Live WOW connectivity
+        truncated: false
+      result: passed
+      note:
+        text: 127.0.0.1:8080/actuator/health 返回 200；业务探针经 5173 Vite proxy 返回 WOW
+          PAYMENT_NOT_FOUND；真实浏览器页面显示连接状态成功。
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: 本轮真实 WOW 联调覆盖健康检查、探针及浏览器连接状态；尚未用真实后端执行完整支付、退款、对账与结算端到端流程。
+      truncated: false
+    - text: 权威列表分页、生产认证/CORS 和既有流程对齐项仍属于已记录的后端后续迭代。
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-09-22T03:12:06.789Z
+blockers: []
+verification:
+  candidate_id: 4ff01f9c-2a30-45f3-b853-f162bc441fef
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:fc31b457-aede-476d-b6f4-3012b5c5b39b
+  iteration: 4
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: frontend-check
+      name:
+        text: Frontend typecheck, tests and production build
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 5771
+  summary:
+    text: 第四轮独立只读验收通过，A1-A10 全部满足。本轮真实浏览器 WOW 误报已由 HttpClient fetch receiver
+      绑定修复，Runtime 全量检查和实际 8080/Vite/浏览器连接证据均有效。
+    truncated: false
+  risks:
+    - text: 未以真实 WOW/CAP4K 后端运行完整支付、退款、对账和结算端到端闭环。
+      truncated: false
+    - text: 权威列表/分页、生产认证/CORS、CAP4K 聚合 trace 与流程对齐仍是后端待办，已在对齐清单明确记录。
+      truncated: false
+    - text: 金额精度表当前只声明 CNY 两位小数。
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-22T03:17:48.688Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: fail
+    unresolved_ids:
+      - A6
+      - A9
+    summary:
+      text: 统一契约、双适配器和核心业务流程总体符合要求，但最近记录缺少删除/清空交互；视觉实现静态上完整，仍需独立浏览器证据。修复后应提交新的候选并进行完整验收。
+      truncated: false
+    completed_at: 2026-09-21T15:13:49.414Z
+  - goal_cycle: 1
+    iteration: 2
+    attempt: 1
+    outcome: fail
+    unresolved_ids:
+      - A6
+    summary:
+      text: 除错误反馈未展示可重试性和源诊断外，其余统一契约、双适配器、业务流程、最近记录、视觉可用性和交付文档均通过。修复 ErrorBlock 并补
+        clear 隔离测试后重新验收。
+      truncated: false
+    completed_at: 2026-09-21T15:25:09.773Z
+  - goal_cycle: 1
+    iteration: 3
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 第三轮独立只读验收通过：A1-A10 全部满足。统一契约、双适配器、核心支付闭环、运营能力、错误与最近记录、响应式交互和交付文档均已核对；正式
+        npm run check 回执通过。
+      truncated: false
+    completed_at: 2026-09-21T15:34:07.111Z
+  - goal_cycle: 1
+    iteration: 3
+    attempt: 1
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: 真实 WOW 服务与 Vite 代理均可访问，但浏览器内健康探测仍误报未连接；退回 Build 修复真实浏览器 fetch 调用并补回归测试。
+      truncated: false
+    completed_at: 2026-09-22T03:06:43.279Z
+  - goal_cycle: 1
+    iteration: 4
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 第四轮独立只读验收通过，A1-A10 全部满足。本轮真实浏览器 WOW 误报已由 HttpClient fetch receiver
+        绑定修复，Runtime 全量检查和实际 8080/Vite/浏览器连接证据均有效。
+      truncated: false
+    completed_at: 2026-09-22T03:17:48.688Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-21T13:41:50.495Z
