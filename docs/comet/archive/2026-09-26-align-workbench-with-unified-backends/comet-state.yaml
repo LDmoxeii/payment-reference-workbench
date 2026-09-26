@@ -1,0 +1,646 @@
+schema: comet.native.v4
+name: align-workbench-with-unified-backends
+language: zh-CN
+phase: archive
+status: done
+state_version: 47
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: c36471b3fdde8f6061f1504eb52173d51c17f0f88abdc8dd919e2b2c8e29b7e3
+spec_changes:
+  - capability: payment-workbench
+    operation: modify
+    source: specs/payment-workbench/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 9
+  attempt: 1
+  retry_epoch: 2
+  failed_iteration_count: 6
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: specs/payment-workbench/spec.md
+    text: 同一页面通过配置切换两个后端 - GIVEN 分别以 WOW 与 CAP4K 配置启动同一版本工作台 - WHEN
+      用户访问支付、退款、对账、结算、人工核对和 timeline 页面 - THEN 页面代码与业务组件不变，且只调用统一服务 - AND
+      两个适配器分别封装实际路径、方法、字段、header、回执、分页、错误和收敛差异 - AND 新增第三适配器不要求修改已有业务页面
+    result: passed
+    reason:
+      text: 页面与业务组件只导入 PaymentWorkbenchService/统一模型；backend-isolation.test.ts 扫描生产
+        UI，禁止 adapter、HTTP、runtime 配置导入和 wow/cap4k 分支。factory.ts
+        是唯一集中选择点，WOW/CAP4K 的路径、方法、header、回执和分页差异均封装在各自 adapter。
+      truncated: false
+  - id: A2
+    source: specs/payment-workbench/spec.md
+    text: 受理、读取和错误语义保持完整 - GIVEN
+      后端分别返回同步拒绝、ACCEPTED、ALREADY_ACCEPTED、READ_ONCE、POLL、RESOURCE_NOT_READY
+      或观察超时 - WHEN 统一服务处理响应并驱动页面观察 - THEN 同步拒绝只形成 ApiError，不伪造 Operation 或资源 -
+      AND receipt、Operation、资源业务状态和 finality 分层展示 - AND POLL 按
+      operationUrl/resourceUrl/retryAfterMs 收敛，超时只形成 OBSERVATION_TIMEOUT - AND
+      Money 不经过 JavaScript 浮点，源错误和 correlationId 可查看
+    result: passed
+    reason:
+      text: models.ts 完整分离 OperationReceipt、Operation、资源
+        status/finality、ReadAfter、ApiError 与十进制字符串 Money；shared.ts
+        归一平铺/嵌套回执且拒绝数字 Money，observeReceipt 按 READ_ONCE/POLL 观察并把未收敛表示为
+        OBSERVATION_TIMEOUT。HTTP 错误保留
+        code/details/correlationId/retryable/源诊断，相关单测和 Runtime frontend-check
+        通过。
+      truncated: false
+  - id: A3
+    source: specs/payment-workbench/spec.md
+    text: 从支付意图推进到可信结果 - GIVEN 合格商户、渠道、policy 与逻辑时钟 - WHEN 用户创建支付、创建并提交 attempt，再通过
+      reference 入口注入 SUCCESS、FAILURE 或 UNKNOWN - THEN
+      页面依次显示支付、attempt、提交回执、结果收件、Operation 和最终性 - AND ACCEPTED
+      不显示为已付款，首个可信成功只显示一个 PaymentSuccessFact - AND
+      duplicate/invalid/unknown-reference/late/conflicting 收件均可查看且不覆盖已确定事实 - AND
+      到期、重试与成功后禁建新 attempt 的可执行状态来自统一资源动作
+    result: passed
+    reason:
+      text: 支付页以统一结构化流程创建 Payment、创建/提交 attempt、接收可信结果并分层展示
+        receipts/Operation/finality；终态仍允许 duplicate/late/conflicting 收件但不重新开放
+        attempt。真实 WOW/CAP4K live smoke 验证成功、冲突不回退首个成功、通知/timeline 和单支付到期关闭。
+      truncated: false
+  - id: A4
+    source: specs/payment-workbench/spec.md
+    text: 部分退款、结果收敛与预算转换 - GIVEN 成功支付仍有可退款金额 - WHEN 用户申请部分退款、创建并提交 attempt，再注入成功、失败或
+      UNKNOWN 结果 - THEN 退款、attempt、receipts、operation 和预算变化可独立观察 - AND
+      相同申请重放不重复预占，超额申请同步拒绝 - AND 成功只转换一次预算，整体失败只释放一次，UNKNOWN/review 继续占用 - AND
+      成功后的迟到失败不回退成功退款或预算事实
+    result: passed
+    reason:
+      text: 退款页和 adapter 保持申请、attempt、提交、结果独立；退款预算用 BigInt 精确推导并拒绝负预算或显式 available
+        不一致。两端真实 HTTP 均完成 1000→部分退款 200，验证
+        succeeded=200、reserved=0、available=800；终态迟到结果入口及旧预算异步串用防护有组件测试。
+      truncated: false
+  - id: A5
+    source: specs/payment-workbench/spec.md
+    text: 筛选五类列表并使用 opaque cursor 翻页 - GIVEN 后端存在跨 merchant、status、finality、时间且含相同
+      sortTime 的五类资源 - WHEN 用户筛选、小页翻页、返回首屏或更换筛选条件 - THEN 页面展示后端权威结果，不以
+      localStorage 或前端全量聚合代替 - AND nextCursor 原样回传，筛选变化清空旧 cursor - AND
+      首屏后新建的更靠前记录不回填旧 cursor 的后续页 - AND INVALID_CURSOR 显示为可理解错误且不会静默回到错误数据集
+    result: passed
+    reason:
+      text: Payment、Refund、ReconciliationRun、Settlement、ManualReviewItem 五类均调用后端权威
+        Page；WOW 用 GET collection/query，CAP4K 用 POST /search/body，cursor
+        原样传递。AuthoritativeList 在筛选/refresh 时清空历史并从首屏重取，继续翻页沿用同一筛选与新
+        cursor；错误不会静默改换数据集。
+      truncated: false
+  - id: A6
+    source: specs/payment-workbench/spec.md
+    text: 从账单 revision 运行对账并处置差异 - GIVEN reference bill provider 中存在稳定 bill/revision
+      和可关联的平台事实 - WHEN 用户登记/发现账单、触发 Run、查看差异、提交带责任字段的处置或
+      FactConfirmation，并在满足条件后完成 - THEN 高 revision 前进且迟到低 revision 不回退，旧 run 与
+      effectiveRun 可区分 - AND
+      MATCHED、PLATFORM_ONLY、CHANNEL_ONLY、AMOUNT/CURRENCY/STATUS_MISMATCH、DUPLICATE、UNMATCHED
+      及双方证据可查看 - AND 原平台事实、账单、初始差异和追加处置分别保留 - AND 未决 blocking difference
+      阻断完成/结算，只有明确结论解除相应阻断
+    result: passed
+    reason:
+      text: AuthoritativeBill 保留 immutable revisions、completeness、指纹、records
+        和原始证据；ReconciliationRun 归一
+        scope、全部统一差异类型、双方证据、dispositions/confirmations 与
+        settlementBlocked。真实双端闭环创建 CHANNEL_ONLY 阻断、提交完整责任字段、解除阻断并达到 FINAL；CAP4K
+        列表额外读取详情，把内部 Bill UUID 归一成业务 billIdentity。
+      truncated: false
+  - id: A7
+    source: specs/payment-workbench/spec.md
+    text: 准备、冻结并安全执行结算 - GIVEN 周期内存在收入、退款、费用、调整、未决、UNKNOWN 和已结算候选 - WHEN 用户
+      prepare、查看构成、confirm、execute 并提交三类结果，或在允许时 void/replacement - THEN
+      每个候选均有来源、纳入/排除和 reason，净额等于 included items 汇总 - AND confirm 后
+      scope/items/Money/version 冻结 - AND SUCCESS 只形成一次，明确 FAILURE 后的新 attempt
+      受控，UNKNOWN 保持原 execution identity 并禁止重付 - AND 负净额进入人工核对，void/replacement
+      不绕过成功事实、UNKNOWN 或 scope 唯一性
+    result: passed
+    reason:
+      text: Settlement 模型和页面展示 INCLUDED/EXCLUDED item
+        来源、reason、Money/version、execution receipts、void/replacement；action
+        只在允许状态开放，UNKNOWN 不开放新执行，明确 EXECUTION_FAILED 才可重试。adapter 测试覆盖 WOW 独立
+        replace 与 CAP4K void+createReplacement，真实两端闭环确认冻结并以同一 execution identity
+        成功结算，净额 794。
+      truncated: false
+  - id: A8
+    source: specs/payment-workbench/spec.md
+    text: 从 payment timeline 追踪并完成人工核对 - GIVEN 一笔支付经历
+      attempts、receipts、退款预算、通知、bill/revision、Run/difference、Settlement 和 review
+      - WHEN 用户打开 payment timeline、通知详情和 ManualReviewItem，并提交完整责任字段 - THEN
+      timeline 按 recordedAt ASC、eventId ASC 稳定展示全部关联事件且保留 occurredAt - AND
+      review 显示 related refs、blocking scopes、证据和追加处置历史 - AND 缺少可信 actor
+      context、reason 或 evidence 时同步拒绝且无副作用 - AND 成功处置展示后端解析的
+      actorId、服务端时间、reason、evidence 和解除阻断结果
+    result: passed
+    reason:
+      text: 人工核对页展示 related refs、blocking scopes、evidence 和追加 disposition 历史；两 adapter
+        在任何 HTTP 前同步校验 actor/reason/evidence，CAP4K 用可信 alias header，WOW 用
+        body。timeline 映射按 recordedAt ASC、eventId ASC 稳定排序并保留 occurredAt；真实
+        live/paired 测试验证 review、notification、timeline 与责任处置。
+      truncated: false
+  - id: A9
+    source: specs/payment-workbench/spec.md
+    text: 使用 reference 实验复现异常并重复闭环 - GIVEN 固定 merchant/channel/actor
+      alias、policy、clock 和 executor scripts - WHEN 用户分别构造
+      success、failure、unknown、duplicate、invalid、unknown-reference、late、conflict
+      与暂不可读场景并从干净运行重复闭环 - THEN 页面记录本次 fixture/policy/clock，且业务结果由后端裁决 - AND
+      callback 不接受客户端自报 verification，CAP4K evidence registration 与 WOW fixture
+      token 差异由适配器处理 - AND 相同输入的规范化状态、错误、关联、排序和副作用可重复，同 identity 不产生第二业务效果
+    result: passed
+    reason:
+      text: Reference Lab 以结构化表单管理 fixture/policy/clock、渠道、账单、通知和结算脚本，明确
+        reference-only 且不允许客户端 verified。WOW token 与 CAP4K evidence registry 差异由
+        adapter 隐藏；真实 paired UNKNOWN 分支验证幂等冲突、重放、同 result identity 单一副作用及
+        ManualReview→CONFIRM_FAILURE 的确定性等价。
+      truncated: false
+  - id: A10
+    source: specs/payment-workbench/spec.md
+    text: 在桌面和移动视口完成结构化业务操作 - GIVEN 用户不熟悉后端 DTO，分别使用桌面和移动视口 - WHEN
+      用户完成支付、退款、对账、结算和人工核对的主要操作 - THEN 表单使用统一业务术语、合理默认值、必填校验和上下文预填 - AND
+      用户无需知道当前后端路由或手写常用动作 JSON - AND 长 ID、Money、状态、证据和错误可读/可复制，控件不重叠 - AND
+      危险动作有明确确认，成功/失败反馈不丢失当前上下文
+    result: passed
+    reason:
+      text: 支付、退款、对账、结算和人工核对均使用业务字段表单、上下文预填、required 校验与危险动作确认，无常用动作自由 JSON。响应式 CSS 在
+        860/600px 断点折叠布局，长 ID/证据可换行、表格局部滚动；桌面/390px 移动基线未见重叠，最终对账 scope
+        表单另有组件测试覆盖。
+      truncated: false
+  - id: A11
+    source: specs/payment-workbench/spec.md
+    text: 请求失败或异步观察暂未收敛 - GIVEN 查询或命令发生字段错误、业务冲突、网络失败、Projection 暂不可见或观察超时 - WHEN
+      页面处理错误并允许用户继续 - THEN 保留表单输入、资源上下文和最近 receipt - AND 展示稳定
+      code、消息、details、correlationId、retryable 和必要源诊断 - AND
+      可重试问题提供安全重试/手动刷新，不可重试问题指向需修改字段或现有资源 - AND 超时不显示为领域失败，后续仍可按 operationId 或
+      resource ref 继续观察
+    result: passed
+    reason:
+      text: BusinessError/ErrorBlock 展示稳定 code、消息、字段、details、correlationId、retryable
+        和可展开源诊断；支付/退款同步拒绝后保留输入并可安全重试。CommandFeedback 保留最近
+        receipt/资源上下文，把观察超时明确标为非领域失败，并允许用同一 Operation ID 继续观察；相关 service/UI
+        测试通过。
+      truncated: false
+  - id: A12
+    source: specs/payment-workbench/spec.md
+    text: 按文档切换后端并注册第三适配器 - GIVEN 开发者获得仓库且不修改页面代码 - WHEN 按 README 分别启动 WOW/CAP4K
+      模式，或实现一个满足统一契约的新 adapter - THEN 应用可以类型检查、测试、构建和连接对应后端 - AND adapter
+      注册集中，配置缺失时给出明确启动或连接错误 - AND 新 adapter 只需实现服务契约、映射、配置注册和契约测试 - AND
+      文档不再声称两端缺少列表、独立 attempt、refund result 或 timeline
+    result: passed
+    reason:
+      text: README 完整说明 WOW/CAP4K mode、代理地址、统一契约、业务流程、验证、已知差异、生产边界和第三 adapter
+        步骤；factory 集中注册，配置缺失会明确报错。Runtime 的 npm.cmd run check 已完成类型检查、107 个测试和
+        production build，文档不再声称两端缺少列表、独立 attempt、退款结果或 timeline。
+      truncated: false
+  - id: A13
+    source: specs/payment-workbench/spec.md
+    text: 经工作台连接真实 WOW 完成代表性闭环 - GIVEN 从干净 reference 运行启动真实 WOW 服务与前端 WOW 配置 - WHEN
+      经工作台创建并成功支付、完成部分退款、发布账单并运行/处置对账、准备/确认/执行结算、查看 review/notification/timeline
+      和五类列表 - THEN 所有请求命中真实 WOW HTTP surface，POLL/RESOURCE_NOT_READY 按 readAfter
+      收敛 - AND 页面显示统一模型、权威分页、完整证据与最终状态 - AND 过程不修改、清理或提交 WOW 工作树，也不复用后端既有 67/67
+      报告代替本次前端证据
+    result: passed
+    reason:
+      text: 绑定当前 candidate 的 real-http-serial-check 在 WOW 8080 对真实 HTTP surface 运行
+        live-smoke 1/1
+        通过，覆盖环境、支付/退款、预算、账单/revision、对账阻断与处置、结算、review、notification、五类列表、timeline
+        和到期关闭；WOW receipt/readAfter 使用实际 POLL/Projection，不借用后端旧 67/67 报告。
+      truncated: false
+  - id: A14
+    source: specs/payment-workbench/spec.md
+    text: 经工作台连接真实 CAP4K 完成代表性闭环 - GIVEN 从干净 H2 reference 运行启动真实 CAP4K 服务与前端 CAP4K
+      配置 - WHEN 经工作台执行与 WOW 等价的支付、退款、账单/对账、结算、review/notification/timeline
+      和五类列表流程 - THEN 所有请求命中真实 CAP4K HTTP surface，READ_ONCE/Operation 语义正确 - AND
+      actor alias 由 X-Reference-Actor-Context 传输，callback evidence 由服务端 registry
+      验证 - AND 页面显示统一模型、权威分页、完整证据与最终状态 - AND 过程不修改、清理或提交 CAP4K 工作树，也不复用后端既有
+      67/67 报告代替本次前端证据
+    result: passed
+    reason:
+      text: 同一 Runtime 检查在 CAP4K 18081 与 Integration Event sink 28081 上运行 live-smoke
+        1/1 通过，真实穿过 READ_ONCE Operation、authoritative bill、actor alias
+        header、callback-evidence registry、对账、结算事件出口、review/notification/timeline
+        和五类列表；检查绑定当前 candidate。
+      truncated: false
+  - id: A15
+    source: specs/payment-workbench/spec.md
+    text: 同一业务场景在两个后端得到等价观察 - GIVEN 两端使用等价 merchant/channel/actor、Money、policy、clock
+      与 executor script - WHEN 分别通过同一前端服务流程执行支付到结算闭环及一个 UNKNOWN/人工处置分支 - THEN
+      规范化 Money、status、finality、ApiError、关联、排序、预算、阻断和副作用一致 - AND WOW 平铺 resource
+      ref 与 CAP4K 嵌套 resource、GET 与 POST search、actor body/header、fixture
+      token/evidence registry、trace/timeline 路径及 void/replacement 组合差异均不可泄漏到页面 -
+      AND 不比较随机内部 ID 字面值，也不要求两个框架采用相同事务或收敛方式
+    result: passed
+    reason:
+      text: paired-consistency-smoke.test.ts 通过真实 WOW/CAP4K HTTP
+        串行执行同一支付成功→部分退款→权威账单/records→CHANNEL_ONLY
+        对账差异与责任处置→解除阻断→结算成功闭环，并读取五类列表、通知和完整 timeline；断言稳定/可重复排序、业务 Bill
+        identity、Money/状态/最终性/关联/预算/结算构成、幂等重放及资源/副作用计数后执行
+        cap4k.toEqual(wow)。同文件保留 UNKNOWN→ManualReview→CONFIRM_FAILURE 分支并比较
+        ApiError、责任事实和单一副作用；Runtime paired 2/2 通过。
+      truncated: false
+builder_handoff:
+  candidate_id: 50e3f012-1b42-4277-a2bf-8f0862b52d39
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:3faeed04-6530-4e2f-8aa1-2e2bde20ab69
+  iteration: 9
+  summary:
+    text: 本轮未修改实现代码。已定位上轮 real-http-serial-check 失败为运行环境问题：WOW 与 CAP4K 均未启动，且 CAP4K
+      首次启动误用了 PATH 中的 Java 11。现已使用项目 JDK 17 启动 WOW 8080、CAP4K 18081 和
+      Integration Event sink 28081，并重新执行 WOW、CAP4K 与 paired 真实 HTTP 场景，结果分别
+      1/1、1/1、2/2 通过。现以同一实现重新冻结 A1-A15 候选。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+    - A7
+    - A8
+    - A9
+    - A10
+    - A11
+    - A12
+    - A13
+    - A14
+    - A15
+  checks:
+    - name:
+        text: WOW, CAP4K and paired complete real HTTP checks
+        truncated: false
+      result: passed
+      note:
+        text: WOW live smoke 1/1、CAP4K live smoke 1/1、paired complete success + UNKNOWN
+          consistency 2/2 passed；两个后端和 CAP4K sink 均由本轮启动。
+        truncated: false
+    - name:
+        text: npm run check
+        truncated: false
+      result: not-run
+      note:
+        text: 本轮仅恢复真实后端环境且没有代码变化；交由 Runtime 在新候选上正式执行。
+        truncated: false
+    - name:
+        text: git diff --check
+        truncated: false
+      result: not-run
+      note:
+        text: 本轮没有代码修改；交由 Runtime 在新候选上正式执行。
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: CAP4K Run 搜索协议只返回权威 Bill 内部 UUID；adapter 会对当前页每个 Run 读取一次权威详情并归一为业务
+        billIdentity。
+      truncated: false
+    - text: CAP4K 的 payment channel 与 notification sender 没有独立 read route，Bill
+        provider 暂不可读次数随 revision 登记；不存在的独立诊断动作明确返回 transport unavailable。
+      truncated: false
+    - text: 2026-09-25 对账截图早于最终 scope 表单，已标为历史基线；本轮不修改 UI。
+      truncated: false
+    - text: 认证授权、生产持久化/Outbox、多实例锁、真实渠道和资金移动仍是生产强化非目标。
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-09-26T12:52:53.528Z
+blockers: []
+verification:
+  candidate_id: 50e3f012-1b42-4277-a2bf-8f0862b52d39
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:00e94fe8-8081-45e5-b3a3-e3650c074e6b
+  iteration: 9
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: frontend-check
+      name:
+        text: TypeScript tests and production build
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 4807
+    - id: diff-check
+      name:
+        text: Git whitespace check
+        truncated: false
+      argv_display:
+        - text: diff
+          truncated: false
+        - text: --check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 346
+    - id: real-http-serial-check
+      name:
+        text: WOW, CAP4K and paired complete real HTTP checks in a safe serial order
+        truncated: false
+      argv_display:
+        - text: -NoProfile
+          truncated: false
+        - text: -NonInteractive
+          truncated: false
+        - text: -Command
+          truncated: false
+        - text: $env:LIVE_PAYMENT_BACKEND='wow';
+            $env:LIVE_PAYMENT_BASE_URL='http://127.0.0.1:8080/api'; npm exec
+            vitest run src/adapters/live-smoke.test.ts --reporter=verbose; if
+            ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE };
+            $env:LIVE_PAYMENT_BACKEND='cap4k';
+            $env:LIVE_PAYMENT_BASE_URL='http://127.0.0.1:18081/api'; npm exec
+            vitest run src/adapters/live-smoke.test.ts --reporter=verbose; if
+            ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Remove-Item
+            Env:LIVE_PAYMENT_BACKEND -ErrorAction SilentlyContinue; Remove-Item
+            Env:LIVE_PAYMENT_BASE_URL -ErrorAction SilentlyContinue;
+            $env:LIVE_PAIRED_CONSISTENCY='1';
+            $env:LIVE_WOW_BASE_URL='http://127.0.0.1:8080/api';
+            $env:LIVE_CAP4K_BASE_URL='http://127.0.0.1:18081/api'; npm exec
+            vitest run src/adapters/paired-consistency-smoke.test.ts
+            --reporter=verbose
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 5375
+  summary:
+    text: 独立只读验收通过：A1-A15 全部满足。当前候选的 Runtime 证据与 workspace/candidate
+      绑定有效，frontend-check、diff-check、WOW/CAP4K/paired 真实 HTTP
+      检查均通过；源码审查确认页面后端隔离、统一模型/观察/错误语义、两端传输映射、结构化业务流程和已知限制表达一致。A15
+      不再只是两端各自通过，而是包含完整成功闭环及 UNKNOWN 人工处置分支的真实 HTTP 规范化快照比较。
+    truncated: false
+  risks:
+    - text: CAP4K ReconciliationRun 搜索摘要只含内部 Bill UUID；为保证统一 billId 永远是业务
+        billIdentity，当前页每个 Run 会额外读取一次详情，正确性已验证但存在 N+1 读开销。
+      truncated: false
+    - text: CAP4K channel/notification 没有独立 read route，Bill 暂不可读次数随 revision
+        登记；不存在的独立诊断动作会明确返回 transport unavailable，业务配置/消费闭环仍可用。
+      truncated: false
+    - text: 2026-09-25 的对账截图早于最终 scope 表单，仅作为历史视觉基线；当前 scope 字段由组件测试与响应式 CSS
+        证据覆盖，后续视觉迭代应刷新截图。
+      truncated: false
+    - text: 登录/认证授权、生产持久化与 Outbox、多实例锁、真实渠道/账单/资金移动仍是明确非目标，当前结果只适用于 reference 学习与验证环境。
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-26T13:02:02.328Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: fail
+    unresolved_ids:
+      - A2
+      - A3
+      - A4
+      - A6
+      - A7
+      - A8
+      - A9
+      - A10
+      - A11
+      - A13
+      - A14
+      - A15
+    summary:
+      text: 独立验收失败：A1、A5、A12 通过，其余 12 项未通过。架构骨架、五类权威分页、文档和成功主路径已具备，四项 Runtime
+        正式检查均通过；但统一业务闭环尚未完成，核心问题集中在观察超时契约、终态异常收件、CAP4K Bill 查询、结算
+        FAILURE/replacement、可信 actor 负向语义、Reference Lab 双端等价、移动视觉证据、错误时表单保留，以及真实
+        HTTP/双端比较覆盖不足。
+      truncated: false
+    completed_at: 2026-09-25T06:17:05.411Z
+  - goal_cycle: 1
+    iteration: 2
+    attempt: 1
+    outcome: fail
+    unresolved_ids:
+      - A3
+      - A4
+      - A6
+      - A9
+      - A14
+      - A15
+    summary:
+      text: 第二轮修复有效关闭了大部分前端实现缺口，但正式验收仍为 9/15 passed、6 failed。失败项为
+        A3、A4、A6、A9、A14、A15：其中 A4 是可在工作台修复的 WOW available refund budget
+        映射错误；其余主要来自已确认但尚未对齐的真实后端 surface 和缺少正式双端异常比较证据。当前候选不能按已确认的完整统一业务规格接受。
+      truncated: false
+    completed_at: 2026-09-25T07:36:55.070Z
+  - goal_cycle: 1
+    iteration: 3
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native check input changed after the candidate was built; a new Builder
+        candidate is required before checks can run again.
+      truncated: false
+    completed_at: 2026-09-25T08:02:34.674Z
+  - goal_cycle: 1
+    iteration: 4
+    attempt: 1
+    outcome: fail
+    unresolved_ids:
+      - A3
+      - A4
+      - A5
+      - A6
+      - A9
+      - A14
+      - A15
+    summary:
+      text: 当前候选独立验收为 8/15 passed、7 failed。Runtime 的 frontend-check、diff-check、WOW
+        live smoke 和 CAP4K live smoke 均通过并绑定当前候选，且工作区 bindingState 仍为 aligned。退款
+        BigInt 预算修复与 ReconciliationRun scope
+        修复有效，但发现两个新的前端可修缺陷：退款预算可能串用旧资源上下文、权威列表 refreshKey 会把新 cursor
+        与旧筛选混用；对账页面还未传递完整 Run scope。其余主要未通过项来自真实后端尚未补齐的 Bill、单支付到期和 reference
+        executor/script surface，以及缺少双端 UNKNOWN 规范化比较。无需申请额外 Runtime
+        checks；这些问题由当前代码和公开 HTTP surface 已可确定。
+      truncated: false
+    completed_at: 2026-09-25T08:23:02.538Z
+  - goal_cycle: 1
+    iteration: 5
+    attempt: 1
+    outcome: fail
+    unresolved_ids:
+      - A3
+      - A6
+      - A9
+      - A14
+      - A15
+    summary:
+      text: 当前候选为 10/15 passed、5 failed、0 blocked。A4/A5 及本轮其他前端可修问题已经有效关闭，Runtime 的
+        frontend-check、diff-check 和串行真实 HTTP 检查均通过且绑定当前候选，workspace bindingState
+        仍为 aligned。剩余失败为 A3、A6、A9、A14、A15，根因均是已由真实后端路由和 adapter 行为确认的后端公开
+        surface 缺口；无需追加 Runtime checks。
+      truncated: false
+    completed_at: 2026-09-25T08:55:11.255Z
+  - goal_cycle: 1
+    iteration: 6
+    attempt: 1
+    outcome: execution-error
+    unresolved_ids: []
+    summary:
+      text: 独立只读 Verifier 子代理已启动，但其执行角色未获得 command.execute capability，第一步
+        verifier-started CLI 回执被平台 PreToolUse
+        门禁拒绝；它未读取候选、未提交判断、未修改任何项目文件。下一次将改用具备命令通道但明确限制为项目只读的独立 Verifier。
+      truncated: false
+    completed_at: 2026-09-26T07:22:30.896Z
+  - goal_cycle: 1
+    iteration: 6
+    attempt: 2
+    outcome: execution-error
+    unresolved_ids: []
+    summary:
+      text: The verifier startup submission was rejected because the response
+        referenced a verifierExecutionRef different from the task-provided ref.
+        The intended verifier task therefore did not begin candidate inspection.
+        A fresh authorized verifier attempt is required.
+      truncated: false
+    completed_at: 2026-09-26T07:23:49.817Z
+  - goal_cycle: 1
+    iteration: 6
+    attempt: 3
+    outcome: execution-error
+    unresolved_ids: []
+    summary:
+      text: Verifier 已用正确 execution ref 提交 startup
+        并开始只读核查，但平台随后明确撤销其子代理工具权限；任务结束时只有部分源码证据，没有完成 A1-A15 逐项判断，也未提交
+        final-result。候选和 Runtime 检查均未变化，下一次将使用具备完整命令与读取权限的独立 Verifier，并保持项目文件只读。
+      truncated: false
+    completed_at: 2026-09-26T07:27:39.392Z
+  - goal_cycle: 1
+    iteration: 6
+    attempt: 4
+    outcome: fail
+    unresolved_ids:
+      - A15
+    summary:
+      text: 独立只读核查当前候选及有效 Runtime 记录：A1–A14 通过，A15 未通过，整体 fail。TypeScript、106
+        个单测、构建、diff check，以及 WOW/CAP4K/paired UNKNOWN 三段真实 HTTP
+        检查均已通过且绑定本候选；无需重复执行。修复方向是对同一业务输入增加支付成功到结算成功的双端规范化闭环快照比较，并刷新与现有对账 scope
+        一致的视觉证据。
+      truncated: false
+    completed_at: 2026-09-26T09:43:47.241Z
+  - goal_cycle: 1
+    iteration: 6
+    attempt: 4
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: 继续修复实现：采用新的 A15 修复思路，把 paired real-HTTP 从
+        UNKNOWN/人工核对分支扩展为双后端完整成功闭环，比较关联、稳定排序、退款预算、对账阻断解除、结算与副作用；不调整已确认需求。
+      truncated: false
+    completed_at: 2026-09-26T09:45:03.217Z
+  - goal_cycle: 1
+    iteration: 7
+    attempt: 1
+    outcome: execution-error
+    unresolved_ids: []
+    summary:
+      text: 可写 Verifier 子代理只收到前序摘要，没有收到本次任务包正文，因此未提交
+        verifier-started、未扫描候选、未修改文件、未返回验收结果。当前候选和 Runtime checks
+        保持不变；将重新派发一个能收到完整上下文的可写 Verifier。
+      truncated: false
+    completed_at: 2026-09-26T10:12:02.071Z
+  - goal_cycle: 1
+    iteration: 7
+    attempt: 2
+    outcome: execution-error
+    unresolved_ids: []
+    summary:
+      text: 独立可写 Verifier 子代理在开始执行时遭遇上游 HTTP 503 Service
+        Unavailable，未能完成启动回执或候选核查，且未修改任何项目文件。当前候选和 Runtime
+        检查保持不变；将使用新的可写子代理重试独立验收。
+      truncated: false
+    completed_at: 2026-09-26T10:14:52.541Z
+  - goal_cycle: 1
+    iteration: 7
+    attempt: 3
+    outcome: execution-error
+    unresolved_ids: []
+    summary:
+      text: 独立可写 Verifier 子代理再次在启动阶段遭遇上游 HTTP 503 Service
+        Unavailable，未完成启动回执或候选核查，且未修改任何项目文件。当前候选和 Runtime
+        检查保持不变；这是连续第二次模型服务基础设施故障。
+      truncated: false
+    completed_at: 2026-09-26T10:17:32.140Z
+  - goal_cycle: 1
+    iteration: 7
+    attempt: 4
+    outcome: execution-error
+    unresolved_ids: []
+    summary:
+      text: 上一独立 Verifier
+        子代理因任务正文传播配置错误，只收到‘继续’，没有得到验收范围、写入边界或交付要求；该子代理已经终止，未核查候选、未修改项目文件、未返回验收结论。将以完整明确的任务正文重新派发新的可写
+        Verifier。
+      truncated: false
+    completed_at: 2026-09-26T12:43:53.949Z
+  - goal_cycle: 1
+    iteration: 7
+    attempt: 4
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native check input changed after the candidate was built; a new Builder
+        candidate is required before checks can run again.
+      truncated: false
+    completed_at: 2026-09-26T12:44:23.539Z
+  - goal_cycle: 1
+    iteration: 8
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: "Builder handoff Runtime checks failed: real-http-serial-check"
+      truncated: false
+    completed_at: 2026-09-26T12:45:26.893Z
+  - goal_cycle: 1
+    iteration: 8
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: 用户明确选择继续修改实现；先诊断并恢复真实 HTTP 双后端检查，再重新冻结候选并派发完整任务正文的可写 Verifier。
+      truncated: false
+    completed_at: 2026-09-26T12:46:12.549Z
+  - goal_cycle: 1
+    iteration: 9
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 独立只读验收通过：A1-A15 全部满足。当前候选的 Runtime 证据与 workspace/candidate
+        绑定有效，frontend-check、diff-check、WOW/CAP4K/paired 真实 HTTP
+        检查均通过；源码审查确认页面后端隔离、统一模型/观察/错误语义、两端传输映射、结构化业务流程和已知限制表达一致。A15
+        不再只是两端各自通过，而是包含完整成功闭环及 UNKNOWN 人工处置分支的真实 HTTP 规范化快照比较。
+      truncated: false
+    completed_at: 2026-09-26T13:02:02.328Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-25T04:02:59.855Z
