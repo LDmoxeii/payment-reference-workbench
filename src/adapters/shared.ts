@@ -1,4 +1,5 @@
 import { BusinessError } from "../domain/errors";
+import { submittableAttempt } from "../domain/attempts";
 import { createMoney, subtractMoney } from "../domain/money";
 import type {
   ActionDescriptor,
@@ -232,7 +233,7 @@ export function mapPayment(adapter: BackendId, value: JsonRecord): Payment {
     reviewIds,
     settlementEligible: booleanValue(value.settlementEligible) ?? null,
     settlementBlocked: booleanValue(value.settlementBlocked) ?? null,
-    actions: paymentActions(status, attempts.length > 0, reviewIds.length > 0),
+    actions: paymentActions(status, attempts, reviewIds.length > 0),
     source: source(adapter, value, paymentId),
   };
 }
@@ -253,7 +254,7 @@ function mapPaymentAttempt(value: JsonRecord): PaymentAttempt {
     completedAt: text(value.completedAt) ?? null,
     externalTransactionId: firstText(value, ["externalTransactionId", "channelTransactionId"]) ?? null,
     finalResult: channelOutcome(value.finalResult),
-    submissions: records(value.submissionReceipts).map(mapSubmission),
+    submissions: mapAttemptSubmissions(value, attemptId, ["externalTransactionId", "channelTransactionId"]),
     receipts: records(value.resultReceipts ?? value.notificationReceipts).map(mapResultReceipt),
   };
 }
@@ -268,6 +269,31 @@ function mapSubmission(value: JsonRecord): ChannelSubmissionReceipt {
     submittedAt: text(value.submittedAt) ?? null,
     diagnostic: text(value.diagnosticSummary) ?? null,
   };
+}
+
+function mapAttemptSubmissions(value: JsonRecord, attemptId: string, channelReferenceKeys: string[]): ChannelSubmissionReceipt[] {
+  const explicit = records(value.submissionReceipts).map(mapSubmission);
+  if (explicit.length > 0) return explicit;
+
+  const status = String(text(value.status) ?? "").toUpperCase();
+  const submittedAt = text(value.submittedAt);
+  const acceptedAt = text(value.acceptedAt);
+  const submissionIdentity = text(value.submissionIdentity);
+  // CAP4K keeps submission evidence on the attempt even after its status becomes terminal.
+  // WOW can mark a newly created attempt PROCESSING and assign requestIdentity
+  // before it is submitted, so neither status nor requestIdentity proves submission.
+  if (!submissionIdentity && !submittedAt && !acceptedAt) return [];
+  const submissionId = submissionIdentity ?? text(value.requestIdentity)
+    ?? `${attemptId}:submitted:${submittedAt ?? acceptedAt}`;
+  return [{
+    submissionId,
+    requestIdentity: text(value.requestIdentity) ?? null,
+    channelId: firstText(value, ["channelId", "channel"]) ?? null,
+    outcome: status,
+    channelReference: firstText(value, channelReferenceKeys) ?? null,
+    submittedAt: firstText(value, ["submittedAt", "acceptedAt"]) ?? null,
+    diagnostic: `由 attempt ${attemptId} 的权威受理事实映射`,
+  }];
 }
 
 function mapResultReceipt(value: JsonRecord): ChannelResultReceipt {
@@ -314,7 +340,7 @@ export function mapRefund(adapter: BackendId, value: JsonRecord): Refund {
     settlementBlocked: booleanValue(value.settlementBlocked) ?? null,
     attempts,
     reviewIds,
-    actions: refundActions(status, attempts.length > 0, reviewIds.length > 0),
+    actions: refundActions(status, attempts, reviewIds.length > 0),
     source: source(adapter, value, refundId),
   };
 }
@@ -332,7 +358,7 @@ function mapRefundAttempt(value: JsonRecord): RefundAttempt {
     completedAt: text(value.completedAt) ?? null,
     externalTransactionId: firstText(value, ["channelRefundId", "channelTransactionId"]) ?? null,
     finalResult: channelOutcome(value.finalResult),
-    submissions: records(value.submissionReceipts).map(mapSubmission),
+    submissions: mapAttemptSubmissions(value, attemptId, ["channelRefundId", "channelTransactionId"]),
     receipts: records(value.resultReceipts ?? value.notificationReceipts).map(mapResultReceipt),
   };
 }
@@ -741,29 +767,38 @@ function evidenceRefs(value: unknown): EvidenceRef[] {
   }).filter((item): item is EvidenceRef => item !== null);
 }
 
-function paymentActions(status: string, hasAttempt: boolean, hasReview: boolean): ActionDescriptor[] {
-  const result: ActionDescriptor[] = [action("VIEW_TIMELINE", "查看完整业务轨迹", "none")];
-  if (["PAYABLE", "PENDING", "PROCESSING", "RESULT_UNKNOWN"].includes(status)) result.push(action("CREATE_PAYMENT_ATTEMPT", "创建支付尝试"));
-  if (hasAttempt && ["PAYABLE", "PENDING", "PROCESSING", "RESULT_UNKNOWN"].includes(status)) {
-    result.push(action("SUBMIT_PAYMENT_ATTEMPT", "提交支付尝试"));
+function attemptActions<T extends { status: string; submissions: ChannelSubmissionReceipt[]; finalResult?: ChannelOutcome | null }>(
+  attempts: T[], createKind: ActionKind, submitKind: ActionKind, createAllowed: boolean,
+): ActionDescriptor[] {
+  const active = attempts.find((attempt) => !attempt.finalResult && !["FAILED", "REJECTED", "SUCCEEDED", "CANCELLED", "CLOSED"].includes(attempt.status));
+  const submittable = attempts.some(submittableAttempt);
+  const create = action(createKind, "创建新 attempt");
+  if (!createAllowed || active) {
+    create.executable = false;
+    create.reason = active ? submittable ? "已有未提交 attempt，请先提交现有 attempt。" : "已有在途 attempt，请等待渠道结果或处理人工核对。" : "当前业务状态不允许创建新 attempt。";
   }
+  const submit = action(submitKind, "提交 attempt");
+  submit.executable = submittable;
+  if (!submittable) submit.reason = active ? "当前 attempt 已提交，请等待结果。" : "请先创建可提交的 attempt。";
+  return [create, submit];
+}
+
+function paymentActions(status: string, attempts: PaymentAttempt[], hasReview: boolean): ActionDescriptor[] {
+  const result: ActionDescriptor[] = [action("VIEW_TIMELINE", "查看完整业务轨迹", "none")];
+  result.push(...attemptActions(attempts, "CREATE_PAYMENT_ATTEMPT", "SUBMIT_PAYMENT_ATTEMPT", ["PAYABLE", "PENDING", "PROCESSING"].includes(status)));
   // Result reception stays available after a business terminal state so the
   // reference workbench can demonstrate duplicate, late and conflicting inbox
   // semantics without pretending that the resource itself can move backwards.
-  if (hasAttempt) result.push(action("RECEIVE_PAYMENT_RESULT", "注入可信渠道结果", "danger"));
+  if (attempts.length) result.push(action("RECEIVE_PAYMENT_RESULT", "注入可信渠道结果", "danger"));
   if (["PAYABLE", "PENDING"].includes(status)) result.push(action("CLOSE_EXPIRED_PAYMENT", "处理到期支付", "danger"));
   if (status === "SUCCEEDED") result.push(action("REQUEST_REFUND", "申请退款", "danger"));
   if (hasReview) result.push(action("RESOLVE_MANUAL_REVIEW", "处理人工核对", "danger"));
   return result;
 }
 
-function refundActions(status: string, hasAttempt: boolean, hasReview: boolean): ActionDescriptor[] {
-  const result: ActionDescriptor[] = [];
-  if (["REQUESTED", "PROCESSING", "RESULT_UNKNOWN"].includes(status)) result.push(action("CREATE_REFUND_ATTEMPT", "创建退款尝试"));
-  if (hasAttempt && ["REQUESTED", "PROCESSING", "RESULT_UNKNOWN"].includes(status)) {
-    result.push(action("SUBMIT_REFUND_ATTEMPT", "提交退款尝试"));
-  }
-  if (hasAttempt) result.push(action("RECEIVE_REFUND_RESULT", "注入可信退款结果", "danger"));
+function refundActions(status: string, attempts: RefundAttempt[], hasReview: boolean): ActionDescriptor[] {
+  const result: ActionDescriptor[] = attemptActions(attempts, "CREATE_REFUND_ATTEMPT", "SUBMIT_REFUND_ATTEMPT", ["REQUESTED", "PROCESSING"].includes(status));
+  if (attempts.length) result.push(action("RECEIVE_REFUND_RESULT", "注入可信退款结果", "danger"));
   if (hasReview || status === "RESULT_UNKNOWN") result.push(action("RESOLVE_MANUAL_REVIEW", "处理人工核对", "danger"));
   return result;
 }

@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { FileCheck2, RefreshCw, Search } from "lucide-react";
 import type { AuthoritativeBill, BusinessCommand, ReconciliationRun } from "../../domain/models";
 import type { PaymentWorkbenchService } from "../../services/workbench-service";
@@ -6,6 +6,7 @@ import { canExecute, confirmAction, findAction, token } from "../action-utils";
 import { AuthoritativeList } from "../AuthoritativeList";
 import { CommandFeedback, DefinitionList, EmptyBlock, ErrorBlock, InlineNotice, LoadingBlock, SectionHeader, SourceDetails, StatusBadge } from "../components";
 import { evidenceLabel, formatMoney, formatTime } from "../format";
+import { referenceBusinessDate, referenceInstant } from "../reference-time";
 import { useCommandExecution } from "../useCommandExecution";
 
 export function ReconciliationPage({ service }: { service: PaymentWorkbenchService }) {
@@ -18,23 +19,69 @@ export function ReconciliationPage({ service }: { service: PaymentWorkbenchServi
   const [error, setError] = useState<unknown>();
   const [notice, setNotice] = useState<string>();
   const [refreshKey, setRefreshKey] = useState(0);
+  const selectedRunId = useRef("");
+  const runRequestSequence = useRef(0);
   const [start, setStart] = useState({ merchantId: "reference-merchant", billId: "", revision: "1", runId: "", channelId: "", currency: "", businessDate: "", businessTimezone: "", idempotencyKey: token("reconciliation") });
   const [signal, setSignal] = useState({ merchantId: "reference-merchant", billId: "", revision: "1", channelId: "", currency: "", businessDate: "", businessTimezone: "", signalIdentity: token("bill-signal"), idempotencyKey: token("bill-available") });
   const [decision, setDecision] = useState({ differenceId: "", revision: "1", merchantId: "reference-merchant", actorAlias: "fixture-reconciliation-operator", actorId: "operator-001", actorRole: "RECONCILIATION_OPERATOR", reason: "依据平台与渠道证据完成核对", evidenceRefs: "reference:evidence-001", conclusion: "ACCEPT_DIFFERENCE" as "ACCEPT_DIFFERENCE" | "ESCALATE" | "CONFIRM_PLATFORM_FACT", settlementImpact: "ALLOW" as "ALLOW" | "BLOCK" | "CONFIRM", outcome: "RESOLVED", factConfirmation: false, idempotencyKey: token("difference-decision") });
 
   useEffect(() => { void service.getReferenceEnvironment().then((value) => {
     const businessTimezone = value.policy?.businessTimezone ?? "";
-    const scope = { channelId: value.channelId, currency: value.policy?.enabledCurrencies?.[0] ?? "", businessDate: businessDateAt(value.currentTime, businessTimezone), businessTimezone };
+    const scope = { channelId: value.channelId, currency: value.policy?.enabledCurrencies?.[0] ?? "", businessDate: referenceBusinessDate(referenceInstant(value.currentTime), businessTimezone), businessTimezone };
     setStart((old) => ({ ...old, ...scope, merchantId: value.merchantId }));
     setSignal((old) => ({ ...old, ...scope, merchantId: value.merchantId }));
-    setDecision((old) => ({ ...old, merchantId: value.merchantId, actorAlias: value.actorAliases?.reconciliationOperator ?? old.actorAlias }));
+    setDecision((old) => ({ ...old, merchantId: selectedRunId.current ? old.merchantId : value.merchantId, actorAlias: value.actorAliases?.reconciliationOperator ?? old.actorAlias }));
   }).catch(setError); }, [service]);
 
-  function applyRun(value: ReconciliationRun) { const singleMerchantId = value.merchantIds.length === 1 ? value.merchantIds[0] : undefined; setRun(value); setLookupId(value.runId); setStart((old) => ({ ...old, billId: value.billId, merchantId: singleMerchantId ?? old.merchantId, revision: String(value.billRevision ?? 1), channelId: value.scope.channelId, currency: value.scope.currency, businessDate: value.scope.businessDate ?? "", businessTimezone: value.scope.businessTimezone ?? "" })); setDecision((old) => ({ ...old, differenceId: value.differences.find((item) => !item.resolved)?.differenceId ?? old.differenceId, merchantId: singleMerchantId ?? old.merchantId, revision: String(value.billRevision ?? 1) })); }
-  async function loadRun(id = lookupId) { if (!id.trim()) return; setLoading(true); setError(undefined); try { applyRun(await service.getReconciliationRun(id.trim())); } catch (cause) { setError(cause); } finally { setLoading(false); } }
+  async function syncBusinessDate() {
+    try {
+      const value = await service.getReferenceEnvironment();
+      const instant = referenceInstant(value.currentTime);
+      setStart((old) => ({ ...old, businessDate: referenceBusinessDate(instant, old.businessTimezone) }));
+      setSignal((old) => ({ ...old, businessDate: referenceBusinessDate(instant, old.businessTimezone) }));
+      setNotice(`业务日期已按 Reference Lab 逻辑时钟 ${instant} 更新。`);
+    } catch (cause) { setError(cause); }
+  }
+
+  async function merchantForRun(value: ReconciliationRun): Promise<string> {
+    if (value.merchantIds.length === 1) return value.merchantIds[0];
+    if (value.merchantIds.length > 1) return "";
+    try {
+      const authoritativeBill = await service.getBill(value.billId);
+      if (authoritativeBill.merchantId?.trim()) return authoritativeBill.merchantId;
+    } catch { /* A bill may be temporarily unreadable; try the linked resource. */ }
+    const linked = value.differences.find((item) => !item.resolved) ?? value.differences[0];
+    try {
+      if (linked?.paymentId) return (await service.getPayment(linked.paymentId)).merchantId;
+      if (linked?.refundId) return (await service.getRefund(linked.refundId)).merchantId;
+    } catch { /* Keep the field blank so the operator can select the merchant explicitly. */ }
+    return "";
+  }
+  function applyRun(value: ReconciliationRun, merchantId: string) {
+    selectedRunId.current = value.runId; setRun(value); setLookupId(value.runId);
+    setStart((old) => ({ ...old, billId: value.billId, merchantId, revision: String(value.billRevision ?? 1), channelId: value.scope.channelId, currency: value.scope.currency, businessDate: value.scope.businessDate ?? "", businessTimezone: value.scope.businessTimezone ?? "" }));
+    setDecision((old) => ({ ...old, differenceId: value.differences.find((item) => !item.resolved)?.differenceId ?? value.differences[0]?.differenceId ?? "", merchantId, revision: String(value.billRevision ?? 1), idempotencyKey: token("difference-decision") }));
+  }
+  async function loadRun(id = lookupId) {
+    if (!id.trim()) return;
+    const target = id.trim();
+    const sequence = ++runRequestSequence.current;
+    if (selectedRunId.current !== target) {
+      setRun(undefined);
+      setDecision((old) => ({ ...old, differenceId: "", merchantId: "" }));
+      setStart((old) => ({ ...old, merchantId: "" }));
+    }
+    selectedRunId.current = target; setLoading(true); setError(undefined);
+    try {
+      const value = await service.getReconciliationRun(target);
+      const merchantId = await merchantForRun(value);
+      if (runRequestSequence.current === sequence && selectedRunId.current === target) applyRun(value, merchantId);
+    } catch (cause) { if (runRequestSequence.current === sequence) setError(cause); }
+    finally { if (runRequestSequence.current === sequence) setLoading(false); }
+  }
   async function execute(command: BusinessCommand, label: string, id?: string) {
     setError(undefined); setNotice(`${label}已提交，正在观察 Operation。`);
-    try { const observed = await execution.run<ReconciliationRun>(command); if (observed.resource) applyRun(observed.resource); else if (id) await loadRun(id); setRefreshKey((value) => value + 1); setNotice(observed.timedOut ? `${label}已受理但观察暂未收敛。` : `${label}已受理，Operation 为 ${observed.operation.status}。`); }
+    try { const observed = await execution.run<ReconciliationRun>(command, id ? () => service.getReconciliationRun(id) : undefined); if (observed.resource) applyRun(observed.resource, await merchantForRun(observed.resource)); else if (id && !observed.timedOut) await loadRun(id); setRefreshKey((value) => value + 1); setNotice(observed.timedOut ? `${label}已受理但观察暂未收敛。` : `${label}已受理，Operation 为 ${observed.operation.status}。`); }
     catch (cause) { setError(cause); }
   }
   async function queryBill(event: FormEvent) { event.preventDefault(); setLoading(true); setError(undefined); try { setBill(await service.getBill(billId.trim())); } catch (cause) { setError(cause); } finally { setLoading(false); } }
@@ -42,15 +89,16 @@ export function ReconciliationPage({ service }: { service: PaymentWorkbenchServi
     setError(undefined); setNotice("正在使用同一 Operation ID 继续观察。");
     try {
       const observed = await execution.resume<ReconciliationRun>();
-      if (observed.resource) applyRun(observed.resource);
-      else if (run) await loadRun(run.runId);
+      if (observed.resource) applyRun(observed.resource, await merchantForRun(observed.resource));
+      else if (run && !observed.timedOut) await loadRun(run.runId);
+      if (!observed.timedOut) setRefreshKey((value) => value + 1);
       setNotice(observed.timedOut ? "Operation 仍未在本次窗口内收敛，可稍后再次继续观察。" : `Operation 已收敛为 ${observed.operation.status}。`);
     } catch (cause) { setError(cause); }
   }
   const evidence = () => decision.evidenceRefs.split(",").map((item) => item.trim()).filter(Boolean);
   const selectedDifference = run?.differences.find((item) => item.differenceId === decision.differenceId);
 
-  return <div className="page-stack"><SectionHeader title="账单与对账" description="权威账单 revision 触发 ReconciliationRun；原始差异、处置与 FactConfirmation 分层保留。" />
+  return <div className="page-stack"><SectionHeader title="账单与对账" description="权威账单 revision 触发 ReconciliationRun；原始差异、处置与 FactConfirmation 分层保留。" action={<button className="button button--small" type="button" onClick={() => void syncBusinessDate()}>从逻辑时钟同步业务日期</button>} />
     <div className="two-column-layout"><section className="panel"><h3><FileCheck2 size={18} />Bill available / refresh</h3><form className="form-grid" onSubmit={(e) => { e.preventDefault(); void execute({ type: "SIGNAL_BILL_AVAILABLE", input: { merchantId: signal.merchantId, billId: signal.billId, revision: Number(signal.revision), channelId: signal.channelId, currency: signal.currency, businessDate: signal.businessDate, businessTimezone: signal.businessTimezone, signalIdentity: signal.signalIdentity, idempotencyKey: signal.idempotencyKey } }, "账单可用信号"); }}>
       <label><span>商户</span><input required value={signal.merchantId} onChange={(e) => setSignal({ ...signal, merchantId: e.target.value })} /></label><label><span>Bill ID</span><input required value={signal.billId} onChange={(e) => setSignal({ ...signal, billId: e.target.value })} /></label><label><span>Revision</span><input required type="number" min="1" value={signal.revision} onChange={(e) => setSignal({ ...signal, revision: e.target.value })} /></label><label><span>渠道</span><input required value={signal.channelId} onChange={(e) => setSignal({ ...signal, channelId: e.target.value })} /></label><label><span>币种</span><input required value={signal.currency} onChange={(e) => setSignal({ ...signal, currency: e.target.value })} /></label><label><span>业务日期</span><input required type="date" value={signal.businessDate} onChange={(e) => setSignal({ ...signal, businessDate: e.target.value })} /></label><label className="span-2"><span>业务时区</span><input required value={signal.businessTimezone} onChange={(e) => setSignal({ ...signal, businessTimezone: e.target.value })} /></label><label><span>Signal identity</span><input required value={signal.signalIdentity} onChange={(e) => setSignal({ ...signal, signalIdentity: e.target.value })} /></label><label><span>幂等键</span><input required value={signal.idempotencyKey} onChange={(e) => setSignal({ ...signal, idempotencyKey: e.target.value })} /></label><button className="button button--primary span-2" disabled={execution.busy} type="submit">通知账单可用</button></form></section>
       <section className="panel"><h3><FileCheck2 size={18} />运行对账</h3><form className="form-grid" onSubmit={(e) => { e.preventDefault(); void execute({ type: "RUN_RECONCILIATION", input: { merchantId: start.merchantId, billId: start.billId, revision: Number(start.revision), runId: start.runId || undefined, channelId: start.channelId, currency: start.currency, businessDate: start.businessDate, businessTimezone: start.businessTimezone, idempotencyKey: start.idempotencyKey } }, "运行对账"); }}>
@@ -73,7 +121,7 @@ export function ReconciliationPage({ service }: { service: PaymentWorkbenchServi
       </div>)}
     </section>)}
     {notice ? <InlineNotice tone={execution.timedOut ? "warning" : "info"}>{notice}</InlineNotice> : null}{error ? <ErrorBlock error={error} onRetry={run ? () => void loadRun(run.runId) : undefined} /> : null}{loading || execution.busy ? <LoadingBlock /> : null}<CommandFeedback receipt={execution.receipt} operation={execution.operation} timedOut={execution.timedOut} observationError={execution.observationError} onContinue={() => void continueObservation()} busy={execution.busy} />
-    <AuthoritativeList title="ReconciliationRun 权威列表" description="ReconciliationRun 是唯一对账执行主资源；业务 scope 是渠道、币种和业务日，merchantId 只是关联筛选条件。" loadPage={(page) => service.listReconciliationRuns(page)} itemKey={(item) => item.runId} specificFilters={[{ key: "billId", label: "Bill ID" }, { key: "billRevision", label: "Bill revision", kind: "number" }, { key: "channelId", label: "渠道" }, { key: "currency", label: "币种" }, { key: "businessDate", label: "业务日期", kind: "date" }, { key: "effectiveRun", label: "Effective run", kind: "boolean" }]} columns={["Run", "Bill / Revision", "业务范围", "关联商户", "状态", "最终性", "结算阻断", ""]} onOpen={applyRun} refreshKey={refreshKey} renderRow={(item, open) => <><td><code>{item.runId}</code></td><td><code>{item.billId} / {item.billRevision ?? "—"}</code></td><td>{item.scope.channelId} · {item.scope.currency} · {item.scope.businessDate ?? "—"}</td><td>{item.merchantIds.join(", ") || "由差异事实关联"}</td><td><StatusBadge status={item.status} /></td><td><StatusBadge status={item.finality} /></td><td>{item.settlementBlocked ? "阻断" : "未阻断"}</td><td><button className="button button--small" type="button" onClick={open}>详情</button></td></>} />
+    <AuthoritativeList title="ReconciliationRun 权威列表" description="ReconciliationRun 是唯一对账执行主资源；业务 scope 是渠道、币种和业务日，merchantId 只是关联筛选条件。" loadPage={(page) => service.listReconciliationRuns(page)} itemKey={(item) => item.runId} specificFilters={[{ key: "billId", label: "Bill ID" }, { key: "billRevision", label: "Bill revision", kind: "number" }, { key: "channelId", label: "渠道" }, { key: "currency", label: "币种" }, { key: "businessDate", label: "业务日期", kind: "date" }, { key: "effectiveRun", label: "Effective run", kind: "boolean" }]} columns={["Run", "Bill / Revision", "业务范围", "关联商户", "状态", "最终性", "结算阻断", ""]} onOpen={(item) => void loadRun(item.runId)} refreshKey={refreshKey} renderRow={(item, open) => <><td><code>{item.runId}</code></td><td><code>{item.billId} / {item.billRevision ?? "—"}</code></td><td>{item.scope.channelId} · {item.scope.currency} · {item.scope.businessDate ?? "—"}</td><td>{item.merchantIds.join(", ") || "由差异事实关联"}</td><td><StatusBadge status={item.status} /></td><td><StatusBadge status={item.finality} /></td><td>{item.settlementBlocked ? "阻断" : "未阻断"}</td><td><button className="button button--small" type="button" onClick={open}>详情</button></td></>} />
     {run ? <><section className="detail-heading"><div><span>对账运行</span><h2 className="mono-title">{run.runId}</h2></div><div><StatusBadge status={run.status} /><StatusBadge status={run.finality} /><button className="icon-button" type="button" onClick={() => void loadRun(run.runId)}><RefreshCw size={16} /></button></div></section><section className="detail-band"><DefinitionList items={[{ label: "Bill", value: <code>{run.billId}</code> }, { label: "Revision", value: String(run.billRevision ?? "—") }, { label: "渠道", value: run.scope.channelId }, { label: "业务日期", value: run.scope.businessDate ?? "—" }, { label: "时区", value: run.scope.businessTimezone ?? "—" }, { label: "币种", value: run.scope.currency }, { label: "关联商户", value: run.merchantIds.join(", ") || "由差异事实确定" }, { label: "Effective run", value: run.effectiveRun == null ? "未知" : run.effectiveRun ? "是" : "否" }, { label: "结算阻断", value: run.settlementBlocked ? "是" : "否" }]} /><SourceDetails source={run.source} /></section>
       <section><SectionHeader title="对账差异" description="双方事实与 matching basis 保持可观察，处置不会覆盖初始差异。" />{run.differences.length === 0 ? <EmptyBlock title="当前运行无差异" /> : <div className="data-table-wrap"><table className="data-table"><thead><tr><th>差异</th><th>类型</th><th>关联</th><th>平台金额</th><th>渠道金额</th><th>Matching basis</th><th>状态</th></tr></thead><tbody>{run.differences.map((item) => <tr key={item.differenceId}><td><button className="button button--small" type="button" onClick={() => setDecision({ ...decision, differenceId: item.differenceId })}>{item.differenceId}</button></td><td>{item.differenceType}</td><td><code>{item.paymentId ?? item.refundId ?? item.externalTransactionId ?? "—"}</code></td><td>{formatMoney(item.platformMoney)}</td><td>{formatMoney(item.channelMoney)}</td><td>{item.matchingBasis ?? "—"}</td><td>{item.resolved ? "已解决" : item.settlementBlocked ? "未决/阻断" : "未决"}</td></tr>)}</tbody></table></div>}</section>
       {selectedDifference ? <section className="panel"><SectionHeader title="差异证据与追加历史" description="原平台/账单证据、DifferenceDisposition 与 FactConfirmation 分层保留。" /><DefinitionList items={[{ label: "Difference", value: <code>{selectedDifference.differenceId}</code> }, { label: "平台事实", value: selectedDifference.platformEvidenceRefs.map(evidenceLabel).join(", ") || "—" }, { label: "账单事实", value: selectedDifference.billEvidenceRefs.map(evidenceLabel).join(", ") || "—" }, { label: "平台状态", value: selectedDifference.platformStatus ?? "—" }, { label: "渠道状态", value: selectedDifference.channelStatus ?? "—" }]} />{selectedDifference.dispositions.map((item, index) => <div className="receipt-row" key={`disposition:${item.recordedAt}:${index}`}><span>Disposition · {item.conclusion ?? item.status ?? "—"}</span><span>{item.actorId ?? "—"} · {item.reason ?? "—"}</span><span>{item.evidenceRefs.map(evidenceLabel).join(", ") || "—"} · {formatTime(item.recordedAt)}</span></div>)}{selectedDifference.confirmations.map((item, index) => <div className="receipt-row" key={`confirmation:${item.recordedAt}:${index}`}><span>FactConfirmation</span><span>{item.actorId ?? "—"} · {item.reason ?? "—"}</span><span>{item.evidenceRefs.map(evidenceLabel).join(", ") || "—"} · {formatTime(item.recordedAt)}</span></div>)}</section> : null}
@@ -87,17 +135,4 @@ export function ReconciliationPage({ service }: { service: PaymentWorkbenchServi
 
 function hasCompleteScope(value: { channelId: string; currency: string; businessDate: string; businessTimezone: string }): boolean {
   return [value.channelId, value.currency, value.businessDate, value.businessTimezone].every((item) => item.trim().length > 0);
-}
-
-function businessDateAt(instant: string | null | undefined, timeZone: string): string {
-  if (!instant || !timeZone) return "";
-  const date = new Date(instant);
-  if (Number.isNaN(date.valueOf())) return "";
-  try {
-    const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
-    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-    return `${values.year}-${values.month}-${values.day}`;
-  } catch {
-    return "";
-  }
 }

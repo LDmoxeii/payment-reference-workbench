@@ -54,13 +54,26 @@ export async function observeReceipt<T extends ReceiptResource = ReceiptResource
   let operation: Operation | undefined;
 
   for (let index = 0; index < attempts; index += 1) {
-    operation = await service.getOperation(receipt.operationId);
+    try {
+      operation = await service.getOperation(receipt.operationId);
+    } catch (error) {
+      if (!operation) throw new AcceptedObservationError(receipt, observationFailure(error, receipt));
+      return { operation, timedOut: true, observationError: observationFailure(error, receipt) };
+    }
     if (isTerminalOperation(operation)) {
-      const resource = await readResourceSafely(service, receipt, options.read);
+      let resource: T | ReceiptResource | undefined;
+      try {
+        resource = await readResourceSafely(service, receipt, options.read);
+      } catch (error) {
+        return { operation, timedOut: true, observationError: observationFailure(error, receipt) };
+      }
       const resourceExpected = Boolean(receipt.resource);
       const resourcePending = operation.status === "SUCCEEDED" && resourceExpected && resource === undefined;
-      if (!resourcePending || receipt.readAfter.mode === "READ_ONCE") {
+      if (!resourcePending) {
         return { operation, resource: resource as T | undefined, timedOut: false };
+      }
+      if (receipt.readAfter.mode === "READ_ONCE") {
+        return { operation, timedOut: true, observationError: resourceNotReady(receipt) };
       }
     }
     if (index + 1 < attempts) await wait(intervalMs);
@@ -104,6 +117,44 @@ async function readResourceSafely<T extends ReceiptResource>(
 
 export function receiptResourceId(receipt: OperationReceipt): string | undefined {
   return receipt.resource?.resourceId;
+}
+
+/** Raised only when an accepted command has no readable Operation yet. */
+export class AcceptedObservationError extends Error {
+  readonly receipt: OperationReceipt;
+  readonly observationError: ApiErrorShape;
+
+  constructor(receipt: OperationReceipt, observationError: ApiErrorShape) {
+    super(`命令已受理（${receipt.operationId}），Operation 观察失败：${observationError.message}`);
+    this.name = "AcceptedObservationError";
+    this.receipt = receipt;
+    this.observationError = observationError;
+  }
+}
+
+function observationFailure(error: unknown, receipt: OperationReceipt): ApiErrorShape {
+  if (error instanceof BusinessError) {
+    return {
+      code: error.code, message: error.message, fields: error.fields,
+      retryable: error.retryable, correlationId: error.correlationId ?? receipt.correlationId ?? undefined,
+      details: error.details, diagnostic: error.diagnostic,
+      sourceCode: error.sourceCode, sourceMessage: error.sourceMessage,
+    };
+  }
+  return {
+    code: "OBSERVATION_FAILED",
+    message: error instanceof Error ? error.message : "Operation 或资源读取失败",
+    fields: [], retryable: true, correlationId: receipt.correlationId ?? undefined,
+    details: { operationId: receipt.operationId, resource: receipt.resource ?? null },
+  };
+}
+
+function resourceNotReady(receipt: OperationReceipt): ApiErrorShape {
+  return {
+    code: "RESOURCE_NOT_READY", message: "命令已受理，Operation 已完成，但详情尚未更新。",
+    fields: [], retryable: true, correlationId: receipt.correlationId ?? undefined,
+    details: { operationId: receipt.operationId, resource: receipt.resource ?? null, readAfter: receipt.readAfter },
+  };
 }
 
 function observationTimeout(receipt: OperationReceipt, attempts: number): ApiErrorShape {

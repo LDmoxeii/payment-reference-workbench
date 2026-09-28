@@ -54,6 +54,19 @@ function changeInput(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function changeSelect(select: HTMLSelectElement, value: string) {
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set?.call(select, value);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function fieldByLabel<T extends HTMLInputElement | HTMLSelectElement>(form: Element, label: string, selector: string): T {
+  const field = Array.from(form.querySelectorAll("label"))
+    .find((item) => item.querySelector("span")?.textContent === label)
+    ?.querySelector<T>(selector);
+  if (!field) throw new Error(`找不到表单字段：${label}`);
+  return field;
+}
+
 function action(kind: ActionDescriptor["kind"], executable = true): ActionDescriptor {
   return { kind, label: kind, executable, availability: "full", confirmation: "none" };
 }
@@ -130,14 +143,48 @@ const refund: Refund = {
 };
 
 describe("支付与退款异常收件", () => {
+  const currentTime = "2047-06-15T08:09:10.000Z";
+
+  it("支付结果使用逻辑时钟，切换详情后保持该发生时间", async () => {
+    const second: Payment = { ...payment, paymentId: "pay-clock-second", merchantOrderId: "order-clock-second" };
+    const view = await render(<PaymentsPage service={service({
+      getReferenceEnvironment: vi.fn().mockResolvedValue({ ...environment, currentTime }),
+      getPayment: vi.fn((id: string) => Promise.resolve(id === second.paymentId ? second : payment)),
+      listPayments: vi.fn().mockResolvedValue({ items: [second], pageSize: 10, nextCursor: null }),
+    })} initialId={payment.paymentId} />);
+    expect(fieldByLabel<HTMLInputElement>(view.querySelector(".action-form")!, "发生时间", "input").value).toBe(currentTime);
+
+    await act(async () => { view.querySelector<HTMLButtonElement>("tr button")?.click(); await Promise.resolve(); });
+    await flush();
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(second.paymentId);
+    expect(fieldByLabel<HTMLInputElement>(view.querySelector(".action-form")!, "发生时间", "input").value).toBe(currentTime);
+  });
+
+  it("退款结果使用逻辑时钟，切换详情后保持该发生时间", async () => {
+    const second: Refund = { ...refund, refundId: "refund-clock-second", merchantRefundId: "merchant-clock-second" };
+    const view = await render(<RefundsPage service={service({
+      getReferenceEnvironment: vi.fn().mockResolvedValue({ ...environment, currentTime }),
+      getRefund: vi.fn((id: string) => Promise.resolve(id === second.refundId ? second : refund)),
+      getPayment: vi.fn().mockResolvedValue(payment),
+      listRefunds: vi.fn().mockResolvedValue({ items: [second], pageSize: 10, nextCursor: null }),
+    })} initialId={refund.refundId} />);
+    expect(fieldByLabel<HTMLInputElement>(view.querySelector(".action-form")!, "发生时间", "input").value).toBe(currentTime);
+
+    await act(async () => { view.querySelector<HTMLButtonElement>("tr button")?.click(); await Promise.resolve(); });
+    await flush();
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(second.refundId);
+    expect(fieldByLabel<HTMLInputElement>(view.querySelector(".action-form")!, "发生时间", "input").value).toBe(currentTime);
+  });
+
   it("终态支付仍由统一 action 开放 late/conflicting/duplicate 结果入口", async () => {
     const view = await render(<PaymentsPage service={service({ getPayment: vi.fn().mockResolvedValue(payment) })} initialId={payment.paymentId} />);
     const resultButton = Array.from(view.querySelectorAll("button")).find((button) => button.textContent?.includes("提交可信结果"));
-    const attemptInput = view.querySelector<HTMLInputElement>('input[list="payment-result-attempts"]');
+    const attemptSelector = view.querySelector<HTMLSelectElement>(".action-form select[required]");
 
     expect(view.textContent).toContain("即使支付已经终态");
     expect(resultButton?.disabled).toBe(false);
-    expect(attemptInput?.tagName).toBe("INPUT");
+    expect(attemptSelector?.tagName).toBe("SELECT");
+    expect(attemptSelector?.value).toBe("attempt-1");
   });
 
   it("终态退款仍由统一 action 开放迟到结果入口", async () => {
@@ -283,7 +330,7 @@ describe("退款详情与预算上下文", () => {
 describe("失败时保留业务输入", () => {
   const rejection = new BusinessError({ code: "VALIDATION_ERROR", message: "字段不合法", retryable: false, fields: [{ field: "merchantOrderId", message: "不能为空" }] });
 
-  it("支付创建同步拒绝后不重置订单号和幂等键，并提供同命令重试", async () => {
+  it("支付创建同步拒绝后保留订单号和幂等键，并对不可重试错误指向字段", async () => {
     const execute = vi.fn().mockRejectedValue(rejection);
     const view = await render(<PaymentsPage service={service({ execute })} />);
     const createForm = Array.from(view.querySelectorAll("form")).find((form) => form.textContent?.includes("创建但不自动发起"));
@@ -298,7 +345,8 @@ describe("失败时保留业务输入", () => {
     expect(inputs?.[1]?.value).toBe(orderBefore);
     expect(inputs?.[5]?.value).toBe(idempotencyBefore);
     expect(view.textContent).toContain("VALIDATION_ERROR");
-    expect(view.querySelector('button[title="重试"]')).not.toBeNull();
+    expect(view.textContent).toContain("merchantOrderId：不能为空");
+    expect(view.querySelector('button[title="重试"]')).toBeNull();
   });
 
   it("退款申请同步拒绝后不重置商户退款号和幂等键", async () => {
@@ -316,6 +364,450 @@ describe("失败时保留业务输入", () => {
     expect(inputs?.[2]?.value).toBe(refundNoBefore);
     expect(inputs?.[5]?.value).toBe(idempotencyBefore);
     expect(view.textContent).toContain("VALIDATION_ERROR");
+  });
+});
+
+describe("首次创建的命令回执生命周期", () => {
+  const rejection = new BusinessError({ code: "IDEMPOTENCY_CONFLICT", message: "幂等键对应的命令内容发生冲突", fields: [], retryable: false });
+
+  function accepted(resourceType: "payment" | "refund", resourceId: string, commandType: string): OperationReceipt {
+    return {
+      operationId: `op-${resourceId}`, commandType, acceptanceStatus: "ACCEPTED", idempotentReplay: false,
+      resource: { resourceType, resourceId },
+      readAfter: { mode: "READ_ONCE", operationUrl: `/operations/op-${resourceId}` },
+      source: { adapter: "wow" },
+    };
+  }
+
+  it("创建 Payment 后保留本次受理与 Operation；下一命令同步拒绝后不显示旧回执", async () => {
+    const created: Payment = { ...payment, paymentId: "pay-created", merchantOrderId: "order-created", status: "PAYABLE", finality: "NON_FINAL", attempts: [], actions: [] };
+    const receipt = accepted("payment", created.paymentId, "CREATE_PAYMENT");
+    const operation: Operation = { operationId: receipt.operationId, commandType: receipt.commandType, resource: receipt.resource, status: "SUCCEEDED", source: { adapter: "wow" } };
+    const execute = vi.fn().mockResolvedValueOnce(receipt).mockRejectedValue(rejection);
+    const view = await render(<PaymentsPage service={service({
+      execute, getOperation: vi.fn().mockResolvedValue(operation), getPayment: vi.fn().mockResolvedValue(created),
+    })} />);
+    const form = Array.from(view.querySelectorAll("form")).find((item) => item.textContent?.includes("创建但不自动发起"))!;
+
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await flush();
+
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(created.paymentId);
+    expect(view.textContent).toContain("最近一次命令");
+    expect(view.textContent).toContain(receipt.operationId);
+    expect(view.textContent).toContain("Operation 状态成功");
+
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await flush();
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(view.textContent).toContain("IDEMPOTENCY_CONFLICT");
+    expect(view.textContent).not.toContain("最近一次命令");
+    expect(view.textContent).not.toContain(receipt.operationId);
+  });
+
+  it("申请 Refund 后保留本次受理与 Operation；同步拒绝时清除旧命令上下文", async () => {
+    const created: Refund = { ...refund, refundId: "refund-created", status: "REQUESTED", finality: "NON_FINAL", attempts: [], actions: [] };
+    const receipt = accepted("refund", created.refundId, "REQUEST_REFUND");
+    const operation: Operation = { operationId: receipt.operationId, commandType: receipt.commandType, resource: receipt.resource, status: "SUCCEEDED", source: { adapter: "wow" } };
+    const execute = vi.fn().mockResolvedValueOnce(receipt).mockRejectedValue(rejection);
+    const view = await render(<RefundsPage service={service({
+      execute, getOperation: vi.fn().mockResolvedValue(operation), getRefund: vi.fn().mockResolvedValue(created),
+      getPayment: vi.fn().mockResolvedValue(payment),
+    })} />);
+    const form = Array.from(view.querySelectorAll("form")).find((item) => item.textContent?.includes("申请并预占退款预算"))!;
+    await setFormInput(form, "来源支付 ID", payment.paymentId);
+
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await flush();
+
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(created.refundId);
+    expect(view.textContent).toContain("最近一次命令");
+    expect(view.textContent).toContain(receipt.operationId);
+    expect(view.textContent).toContain("Operation 状态成功");
+
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await flush();
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(view.textContent).toContain("IDEMPOTENCY_CONFLICT");
+    expect(view.textContent).not.toContain("最近一次命令");
+    expect(view.textContent).not.toContain(receipt.operationId);
+  });
+
+  it("已受理的 Payment 创建首次观察失败后可继续观察同一 Operation", async () => {
+    const created: Payment = { ...payment, paymentId: "pay-observation", status: "PAYABLE", finality: "NON_FINAL", attempts: [], actions: [] };
+    const receipt = accepted("payment", created.paymentId, "CREATE_PAYMENT");
+    const operation: Operation = { operationId: receipt.operationId, commandType: receipt.commandType, resource: receipt.resource, status: "SUCCEEDED", source: { adapter: "wow" } };
+    const getOperation = vi.fn().mockRejectedValueOnce(new Error("temporary network failure")).mockResolvedValue(operation);
+    const getPayment = vi.fn().mockResolvedValue(created);
+    const view = await render(<PaymentsPage service={service({ execute: vi.fn().mockResolvedValue(receipt), getOperation, getPayment })} />);
+    const form = Array.from(view.querySelectorAll("form")).find((item) => item.textContent?.includes("创建但不自动发起"))!;
+
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await flush();
+
+    expect(view.textContent).toContain(receipt.operationId);
+    expect(view.textContent).toContain("观察诊断");
+    const continueButton = Array.from(view.querySelectorAll<HTMLButtonElement>("button")).find((item) => item.textContent?.includes("继续观察同一 Operation"))!;
+    await act(async () => { continueButton.click(); await Promise.resolve(); });
+    await flush();
+
+    expect(getOperation).toHaveBeenCalledTimes(2);
+    expect(getPayment).toHaveBeenCalledWith(created.paymentId);
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(created.paymentId);
+    expect(view.textContent).toContain(receipt.operationId);
+  });
+
+  it("手动切换到另一 Payment 详情时清除前一次创建命令", async () => {
+    const created: Payment = { ...payment, paymentId: "pay-created", attempts: [] };
+    const other: Payment = { ...payment, paymentId: "pay-other", merchantOrderId: "order-other" };
+    const receipt = accepted("payment", created.paymentId, "CREATE_PAYMENT");
+    const operation: Operation = { operationId: receipt.operationId, commandType: receipt.commandType, resource: receipt.resource, status: "SUCCEEDED", source: { adapter: "wow" } };
+    const view = await render(<PaymentsPage service={service({
+      execute: vi.fn().mockResolvedValue(receipt), getOperation: vi.fn().mockResolvedValue(operation),
+      getPayment: vi.fn((id: string) => Promise.resolve(id === other.paymentId ? other : created)),
+      listPayments: vi.fn().mockResolvedValue({ items: [other], pageSize: 10, nextCursor: null }),
+    })} />);
+    const form = Array.from(view.querySelectorAll("form")).find((item) => item.textContent?.includes("创建但不自动发起"))!;
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await flush();
+    expect(view.textContent).toContain(receipt.operationId);
+
+    await act(async () => { view.querySelector<HTMLButtonElement>("tr button")?.click(); await Promise.resolve(); });
+    await flush();
+
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(other.paymentId);
+    expect(view.textContent).not.toContain("最近一次命令");
+    expect(view.textContent).not.toContain(receipt.operationId);
+  });
+
+  it("手动切换到另一 Refund 详情时清除前一次申请命令", async () => {
+    const created: Refund = { ...refund, refundId: "refund-created", attempts: [] };
+    const other: Refund = { ...refund, refundId: "refund-other", merchantRefundId: "merchant-other" };
+    const receipt = accepted("refund", created.refundId, "REQUEST_REFUND");
+    const operation: Operation = { operationId: receipt.operationId, commandType: receipt.commandType, resource: receipt.resource, status: "SUCCEEDED", source: { adapter: "wow" } };
+    const view = await render(<RefundsPage service={service({
+      execute: vi.fn().mockResolvedValue(receipt), getOperation: vi.fn().mockResolvedValue(operation),
+      getRefund: vi.fn((id: string) => Promise.resolve(id === other.refundId ? other : created)),
+      getPayment: vi.fn().mockResolvedValue(payment),
+      listRefunds: vi.fn().mockResolvedValue({ items: [other], pageSize: 10, nextCursor: null }),
+    })} />);
+    const form = Array.from(view.querySelectorAll("form")).find((item) => item.textContent?.includes("申请并预占退款预算"))!;
+    await setFormInput(form, "来源支付 ID", payment.paymentId);
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await flush();
+    expect(view.textContent).toContain(receipt.operationId);
+
+    await act(async () => { view.querySelector<HTMLButtonElement>("tr button")?.click(); await Promise.resolve(); });
+    await flush();
+
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(other.refundId);
+    expect(view.textContent).not.toContain("最近一次命令");
+    expect(view.textContent).not.toContain(receipt.operationId);
+  });
+
+  it("Payment 创建命令尚未返回时切换详情，迟到成功不重新选回旧资源或显示旧回执", async () => {
+    const created: Payment = { ...payment, paymentId: "pay-late", merchantOrderId: "order-late", attempts: [] };
+    const other: Payment = { ...payment, paymentId: "pay-current", merchantOrderId: "order-current" };
+    const pending = deferred<OperationReceipt>();
+    const receipt = accepted("payment", created.paymentId, "CREATE_PAYMENT");
+    const operation: Operation = { operationId: receipt.operationId, commandType: receipt.commandType, resource: receipt.resource, status: "SUCCEEDED", source: { adapter: "wow" } };
+    const view = await render(<PaymentsPage service={service({
+      execute: vi.fn().mockReturnValue(pending.promise), getOperation: vi.fn().mockResolvedValue(operation),
+      getPayment: vi.fn((id: string) => Promise.resolve(id === other.paymentId ? other : created)),
+      listPayments: vi.fn().mockResolvedValue({ items: [other], pageSize: 10, nextCursor: null }),
+    })} />);
+    const form = Array.from(view.querySelectorAll("form")).find((item) => item.textContent?.includes("创建但不自动发起"))!;
+
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await act(async () => { view.querySelector<HTMLButtonElement>("tr button")?.click(); await Promise.resolve(); });
+    await flush();
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(other.paymentId);
+
+    await act(async () => { pending.resolve(receipt); await pending.promise; });
+    await flush();
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(other.paymentId);
+    expect(view.textContent).not.toContain("最近一次命令");
+    expect(view.textContent).not.toContain(receipt.operationId);
+    expect(view.textContent).not.toContain("观察诊断");
+  });
+
+  it("Payment 已受理但观察失败迟到时，不把旧 Operation 与诊断写到新详情", async () => {
+    const created: Payment = { ...payment, paymentId: "pay-observe-late", attempts: [] };
+    const other: Payment = { ...payment, paymentId: "pay-observe-current" };
+    const receipt = accepted("payment", created.paymentId, "CREATE_PAYMENT");
+    const pendingOperation = deferred<Operation>();
+    const view = await render(<PaymentsPage service={service({
+      execute: vi.fn().mockResolvedValue(receipt), getOperation: vi.fn().mockReturnValue(pendingOperation.promise),
+      getPayment: vi.fn().mockResolvedValue(other),
+      listPayments: vi.fn().mockResolvedValue({ items: [other], pageSize: 10, nextCursor: null }),
+    })} />);
+    const form = Array.from(view.querySelectorAll("form")).find((item) => item.textContent?.includes("创建但不自动发起"))!;
+
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    expect(view.textContent).toContain(receipt.operationId);
+    await act(async () => { view.querySelector<HTMLButtonElement>("tr button")?.click(); await Promise.resolve(); });
+    await flush();
+
+    await act(async () => { pendingOperation.reject(new Error("old observation failed")); try { await pendingOperation.promise; } catch { /* observed by run */ } });
+    await flush();
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(other.paymentId);
+    expect(view.textContent).not.toContain(receipt.operationId);
+    expect(view.textContent).not.toContain("old observation failed");
+    expect(view.textContent).not.toContain("观察诊断");
+  });
+
+  it("Refund 申请命令尚未返回时切换详情，迟到成功不重新选回旧资源或显示旧回执", async () => {
+    const created: Refund = { ...refund, refundId: "refund-late", merchantRefundId: "merchant-late", attempts: [] };
+    const other: Refund = { ...refund, refundId: "refund-current", merchantRefundId: "merchant-current" };
+    const pending = deferred<OperationReceipt>();
+    const receipt = accepted("refund", created.refundId, "REQUEST_REFUND");
+    const operation: Operation = { operationId: receipt.operationId, commandType: receipt.commandType, resource: receipt.resource, status: "SUCCEEDED", source: { adapter: "wow" } };
+    const view = await render(<RefundsPage service={service({
+      execute: vi.fn().mockReturnValue(pending.promise), getOperation: vi.fn().mockResolvedValue(operation),
+      getRefund: vi.fn((id: string) => Promise.resolve(id === other.refundId ? other : created)),
+      getPayment: vi.fn().mockResolvedValue(payment),
+      listRefunds: vi.fn().mockResolvedValue({ items: [other], pageSize: 10, nextCursor: null }),
+    })} />);
+    const form = Array.from(view.querySelectorAll("form")).find((item) => item.textContent?.includes("申请并预占退款预算"))!;
+    await setFormInput(form, "来源支付 ID", payment.paymentId);
+
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await act(async () => { view.querySelector<HTMLButtonElement>("tr button")?.click(); await Promise.resolve(); });
+    await flush();
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(other.refundId);
+
+    await act(async () => { pending.resolve(receipt); await pending.promise; });
+    await flush();
+    expect(view.querySelector(".detail-heading")?.textContent).toContain(other.refundId);
+    expect(view.textContent).not.toContain("最近一次命令");
+    expect(view.textContent).not.toContain(receipt.operationId);
+    expect(view.textContent).not.toContain("观察诊断");
+  });
+});
+
+describe("Payment 与 Refund 详情上下文和 Attempt 级联", () => {
+  it("Payment 列表摘要只作导航，权威详情驱动 Attempt 选择、关联字段和资源 identity", async () => {
+    const submittedAttempt = (attemptId: string, channelId: string, externalTransactionId?: string): Payment["attempts"][number] => ({
+      attemptId, channelId, externalTransactionId, status: "SUBMITTED",
+      submissions: [{ submissionId: `submission-${attemptId}` }], receipts: [],
+    });
+    const detailA: Payment = {
+      ...payment, paymentId: "pay-a", merchantOrderId: "order-a", status: "PROCESSING", finality: "NON_FINAL",
+      attempts: [submittedAttempt("attempt-a", "channel-a", "external-a"), submittedAttempt("attempt-b", "channel-b")],
+      actions: [action("RECEIVE_PAYMENT_RESULT")],
+    };
+    const detailB: Payment = {
+      ...payment, paymentId: "pay-b", merchantOrderId: "order-b", status: "PROCESSING", finality: "NON_FINAL",
+      attempts: [submittedAttempt("attempt-c", "channel-c", "external-c")],
+      actions: [action("RECEIVE_PAYMENT_RESULT")],
+    };
+    const listPayments = vi.fn().mockResolvedValue({
+      items: [{ ...detailA, attempts: [] }, { ...detailB, attempts: [] }], pageSize: 10, nextCursor: null,
+    });
+    const getPayment = vi.fn((id: string) => Promise.resolve(id === detailA.paymentId ? detailA : detailB));
+    const view = await render(<PaymentsPage service={service({ listPayments, getPayment })} />);
+    const detailButtons = Array.from(view.querySelectorAll<HTMLButtonElement>("tr button")).filter((button) => button.textContent === "详情");
+
+    await act(async () => { detailButtons[0].click(); await Promise.resolve(); });
+    await flush();
+    expect(getPayment).toHaveBeenCalledWith("pay-a");
+    expect(view.textContent).toContain("attempt-a");
+    const resultFormA = view.querySelector(".action-form")!;
+    const attemptSelectorA = resultFormA.querySelector<HTMLSelectElement>("select[required]")!;
+    const resultIdentityA = fieldByLabel<HTMLInputElement>(resultFormA, "Result identity", "input").value;
+    await act(async () => { changeSelect(attemptSelectorA, "attempt-a"); });
+    expect(fieldByLabel<HTMLInputElement>(resultFormA, "渠道", "input").value).toBe("channel-a");
+    expect(fieldByLabel<HTMLInputElement>(resultFormA, "外部交易号（由已提交 attempt 预填）", "input").value).toBe("external-a");
+    await act(async () => { changeSelect(attemptSelectorA, "attempt-b"); });
+    expect(fieldByLabel<HTMLInputElement>(resultFormA, "渠道", "input").value).toBe("channel-b");
+    expect(fieldByLabel<HTMLInputElement>(resultFormA, "外部交易号（由已提交 attempt 预填）", "input").value).toBe("");
+    await act(async () => { changeInput(fieldByLabel<HTMLInputElement>(resultFormA, "外部交易号（由已提交 attempt 预填）", "input"), "manually-entered-b"); });
+    await act(async () => { changeSelect(attemptSelectorA, "attempt-a"); });
+    expect(fieldByLabel<HTMLInputElement>(resultFormA, "外部交易号（由已提交 attempt 预填）", "input").value).toBe("external-a");
+    await act(async () => { changeSelect(attemptSelectorA, "attempt-b"); });
+    expect(fieldByLabel<HTMLInputElement>(resultFormA, "外部交易号（由已提交 attempt 预填）", "input").value).toBe("");
+
+    await act(async () => { detailButtons[1].click(); await Promise.resolve(); });
+    await flush();
+    const resultFormB = view.querySelector(".action-form")!;
+    expect(view.textContent).toContain("目标 Payment ID：pay-b");
+    expect(resultFormB.querySelector<HTMLSelectElement>("select[required]")?.value).toBe("attempt-c");
+    expect(fieldByLabel<HTMLInputElement>(resultFormB, "渠道", "input").value).toBe("channel-c");
+    expect(fieldByLabel<HTMLInputElement>(resultFormB, "外部交易号（由已提交 attempt 预填）", "input").value).toBe("external-c");
+    expect(fieldByLabel<HTMLInputElement>(resultFormB, "Result identity", "input").value).not.toBe(resultIdentityA);
+  });
+
+  it("Refund 自动选择唯一可提交 Attempt，结果选择级联渠道退款号，未知引用只在异常模式输入", async () => {
+    const detail: Refund = {
+      ...refund, refundId: "refund-context", status: "PROCESSING", finality: "NON_FINAL",
+      attempts: [
+        { attemptId: "refund-new", channelId: "channel-new", status: "CREATED", submissions: [], receipts: [] },
+        { attemptId: "refund-submitted", channelId: "channel-result", externalTransactionId: "refund-external", status: "SUBMITTED", submissions: [{ submissionId: "refund-submission-1" }], receipts: [] },
+      ],
+      actions: [action("CREATE_REFUND_ATTEMPT", false), action("SUBMIT_REFUND_ATTEMPT"), action("RECEIVE_REFUND_RESULT")],
+    };
+    const view = await render(<RefundsPage service={service({
+      listRefunds: vi.fn().mockResolvedValue({ items: [{ ...detail, attempts: [] }], pageSize: 10, nextCursor: null }),
+      getRefund: vi.fn().mockResolvedValue(detail),
+      getPayment: vi.fn().mockResolvedValue({ ...payment, paymentId: detail.paymentId }),
+    })} />);
+    const open = Array.from(view.querySelectorAll<HTMLButtonElement>("tr button")).find((button) => button.textContent === "详情")!;
+    await act(async () => { open.click(); await Promise.resolve(); });
+    await flush();
+
+    const submitForm = Array.from(view.querySelectorAll("form")).find((form) => form.querySelector("h3")?.textContent?.includes("提交 attempt"))!;
+    expect(fieldByLabel<HTMLSelectElement>(submitForm, "Attempt", "select").value).toBe("refund-new");
+    const resultForm = view.querySelector(".action-form")!;
+    const resultAttempt = resultForm.querySelector<HTMLSelectElement>("select[required]")!;
+    expect(resultAttempt.value).toBe("refund-submitted");
+    expect(fieldByLabel<HTMLInputElement>(resultForm, "渠道", "input").value).toBe("channel-result");
+    expect(fieldByLabel<HTMLInputElement>(resultForm, "渠道退款号（由已提交 attempt 预填）", "input").value).toBe("refund-external");
+    expect(view.textContent).toContain("目标 Refund ID：refund-context");
+
+    const exceptionToggle = resultForm.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => { exceptionToggle.click(); });
+    expect(fieldByLabel<HTMLInputElement>(resultForm, "异常 Attempt ID", "input")).not.toBeNull();
+    expect(resultForm.querySelector<HTMLSelectElement>("select[required]")).toBeNull();
+  });
+
+  it("支付 Attempt 没有外部交易号时可以补录，空值在页面被拒绝且不会发送命令", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const detail: Payment = {
+      ...payment, paymentId: "pay-no-channel-reference", status: "PROCESSING", finality: "NON_FINAL",
+      attempts: [{ attemptId: "attempt-no-reference", channelId: "C-001", status: "ACCEPTED", submissions: [{ submissionId: "submission-1" }], receipts: [] }],
+      actions: [action("RECEIVE_PAYMENT_RESULT")],
+    };
+    const receipt: OperationReceipt = {
+      operationId: "op-result", commandType: "RECEIVE_PAYMENT_RESULT", resource: { resourceType: "payment", resourceId: detail.paymentId },
+      acceptanceStatus: "ACCEPTED", idempotentReplay: false, readAfter: { mode: "READ_ONCE", operationUrl: "/operations/op-result" }, source: { adapter: "cap4k" },
+    };
+    const execute = vi.fn().mockResolvedValue(receipt);
+    const getOperation = vi.fn().mockResolvedValue({ operationId: receipt.operationId, commandType: receipt.commandType, resource: receipt.resource, status: "SUCCEEDED", source: { adapter: "cap4k" } });
+    const view = await render(<PaymentsPage service={service({ getPayment: vi.fn().mockResolvedValue(detail), execute, getOperation })} initialId={detail.paymentId} />);
+    const form = view.querySelector<HTMLFormElement>(".action-form form")!;
+    const external = fieldByLabel<HTMLInputElement>(form, "外部交易号（由已提交 attempt 预填）", "input");
+    expect(external.readOnly).toBe(false);
+    expect(external.required).toBe(false);
+    expect(view.textContent).toContain("请在上方补充渠道交易号");
+
+    await act(async () => { form.requestSubmit(); await Promise.resolve(); });
+    expect(execute).not.toHaveBeenCalled();
+    expect(view.textContent).toContain("CHANNEL_TRANSACTION_ID_REQUIRED");
+
+    await act(async () => { changeInput(external, "txn-manual-1"); });
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await flush();
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      type: "RECEIVE_PAYMENT_RESULT", input: expect.objectContaining({ attemptId: "attempt-no-reference", externalTransactionId: "txn-manual-1" }),
+    }));
+  });
+
+  it("退款 Attempt 没有渠道退款号时可以补录，空值在页面被拒绝且不会发送命令", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const detail: Refund = {
+      ...refund, refundId: "refund-no-channel-reference", status: "PROCESSING", finality: "NON_FINAL",
+      attempts: [{ attemptId: "refund-attempt-no-reference", channelId: "C-001", status: "ACCEPTED", submissions: [{ submissionId: "submission-2" }], receipts: [] }],
+      actions: [action("RECEIVE_REFUND_RESULT")],
+    };
+    const receipt: OperationReceipt = {
+      operationId: "op-refund-result", commandType: "RECEIVE_REFUND_RESULT", resource: { resourceType: "refund", resourceId: detail.refundId },
+      acceptanceStatus: "ACCEPTED", idempotentReplay: false, readAfter: { mode: "READ_ONCE", operationUrl: "/operations/op-refund-result" }, source: { adapter: "cap4k" },
+    };
+    const execute = vi.fn().mockResolvedValue(receipt);
+    const getOperation = vi.fn().mockResolvedValue({ operationId: receipt.operationId, commandType: receipt.commandType, resource: receipt.resource, status: "SUCCEEDED", source: { adapter: "cap4k" } });
+    const view = await render(<RefundsPage service={service({ getRefund: vi.fn().mockResolvedValue(detail), getPayment: vi.fn().mockResolvedValue(payment), execute, getOperation })} initialId={detail.refundId} />);
+    const form = view.querySelector<HTMLFormElement>(".action-form form")!;
+    const external = fieldByLabel<HTMLInputElement>(form, "渠道退款号（由已提交 attempt 预填）", "input");
+    expect(external.readOnly).toBe(false);
+    expect(external.required).toBe(false);
+    expect(view.textContent).toContain("请在上方补充后提交");
+
+    await act(async () => { form.requestSubmit(); await Promise.resolve(); });
+    expect(execute).not.toHaveBeenCalled();
+    expect(view.textContent).toContain("CHANNEL_REFUND_ID_REQUIRED");
+
+    await act(async () => { changeInput(external, "refund-manual-1"); });
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await flush();
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      type: "RECEIVE_REFUND_RESULT", input: expect.objectContaining({ attemptId: "refund-attempt-no-reference", externalTransactionId: "refund-manual-1" }),
+    }));
+  });
+
+  it("创建 PaymentAttempt 后自动回读权威详情、刷新列表并选中唯一可提交 Attempt", async () => {
+    const initial: Payment = {
+      ...payment, paymentId: "pay-refresh", status: "PAYABLE", finality: "NON_FINAL", attempts: [],
+      actions: [action("CREATE_PAYMENT_ATTEMPT"), action("SUBMIT_PAYMENT_ATTEMPT", false)],
+    };
+    const updated: Payment = {
+      ...initial,
+      attempts: [{ attemptId: "attempt-created", channelId: "reference-channel", status: "CREATED", submissions: [], receipts: [] }],
+      actions: [action("CREATE_PAYMENT_ATTEMPT", false), action("SUBMIT_PAYMENT_ATTEMPT")],
+    };
+    const listPayments = vi.fn().mockResolvedValue({ items: [{ ...initial, attempts: [] }], pageSize: 10, nextCursor: null });
+    const getPayment = vi.fn().mockResolvedValueOnce(initial).mockResolvedValue(updated);
+    const receipt: OperationReceipt = {
+      operationId: "op-attempt-created", commandType: "CREATE_PAYMENT_ATTEMPT",
+      resource: { resourceType: "payment", resourceId: initial.paymentId }, acceptanceStatus: "ACCEPTED",
+      idempotentReplay: false, readAfter: { mode: "READ_ONCE", operationUrl: "/operations/op-attempt-created" }, source: { adapter: "wow" },
+    };
+    const operation: Operation = { operationId: receipt.operationId, commandType: receipt.commandType, resource: receipt.resource, status: "SUCCEEDED", source: { adapter: "wow" } };
+    const view = await render(<PaymentsPage service={service({ listPayments, getPayment, execute: vi.fn().mockResolvedValue(receipt), getOperation: vi.fn().mockResolvedValue(operation) })} />);
+    await act(async () => { Array.from(view.querySelectorAll<HTMLButtonElement>("tr button")).find((button) => button.textContent === "详情")?.click(); await Promise.resolve(); });
+    await flush();
+    const createAttempt = Array.from(view.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "创建 attempt")!;
+    await act(async () => { createAttempt.click(); await Promise.resolve(); });
+    await flush();
+
+    expect(getPayment).toHaveBeenCalledTimes(2);
+    expect(listPayments.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(view.textContent).toContain("attempt-created");
+    const submitForm = Array.from(view.querySelectorAll("form")).find((form) => form.querySelector("h3")?.textContent?.includes("提交 attempt"))!;
+    expect(fieldByLabel<HTMLSelectElement>(submitForm, "Attempt", "select").value).toBe("attempt-created");
+  });
+
+  it("创建 RefundAttempt 后自动回读权威详情和来源支付预算，无需手工刷新", async () => {
+    const initial: Refund = {
+      ...refund, refundId: "refund-refresh", status: "REQUESTED", finality: "NON_FINAL", attempts: [],
+      actions: [action("CREATE_REFUND_ATTEMPT"), action("SUBMIT_REFUND_ATTEMPT", false)],
+    };
+    const updated: Refund = {
+      ...initial, status: "PROCESSING",
+      attempts: [{ attemptId: "refund-attempt-created", channelId: "reference-channel", status: "CREATED", submissions: [], receipts: [] }],
+      actions: [action("CREATE_REFUND_ATTEMPT", false), action("SUBMIT_REFUND_ATTEMPT")],
+    };
+    const sourcePayment: Payment = {
+      ...payment, paymentId: initial.paymentId,
+      refundBudget: {
+        originalAmount: { currency: "CNY", amountMinor: "10000" },
+        succeededAmount: { currency: "CNY", amountMinor: "2000" },
+        reservedAmount: { currency: "CNY", amountMinor: "2000" },
+        availableAmount: { currency: "CNY", amountMinor: "6000" },
+      },
+    };
+    const listRefunds = vi.fn().mockResolvedValue({ items: [{ ...initial, attempts: [] }], pageSize: 10, nextCursor: null });
+    const getRefund = vi.fn().mockResolvedValueOnce(initial).mockResolvedValue(updated);
+    const receipt: OperationReceipt = {
+      operationId: "op-refund-attempt-created", commandType: "CREATE_REFUND_ATTEMPT",
+      resource: { resourceType: "refund", resourceId: initial.refundId }, acceptanceStatus: "ACCEPTED",
+      idempotentReplay: false, readAfter: { mode: "READ_ONCE", operationUrl: "/operations/op-refund-attempt-created" }, source: { adapter: "cap4k" },
+    };
+    const operation: Operation = { operationId: receipt.operationId, commandType: receipt.commandType, resource: receipt.resource, status: "SUCCEEDED", source: { adapter: "cap4k" } };
+    const view = await render(<RefundsPage service={service({ listRefunds, getRefund, getPayment: vi.fn().mockResolvedValue(sourcePayment), execute: vi.fn().mockResolvedValue(receipt), getOperation: vi.fn().mockResolvedValue(operation) })} />);
+    await act(async () => { Array.from(view.querySelectorAll<HTMLButtonElement>("tr button")).find((button) => button.textContent === "详情")?.click(); await Promise.resolve(); });
+    await flush();
+    const createAttempt = Array.from(view.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "创建 attempt")!;
+    await act(async () => { createAttempt.click(); await Promise.resolve(); });
+    await flush();
+
+    expect(getRefund).toHaveBeenCalledTimes(2);
+    expect(listRefunds.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(view.textContent).toContain("refund-attempt-created");
+    expect(view.textContent).toContain("CNY 60.00");
+    const submitForm = Array.from(view.querySelectorAll("form")).find((form) => form.querySelector("h3")?.textContent?.includes("提交 attempt"))!;
+    expect(fieldByLabel<HTMLSelectElement>(submitForm, "Attempt", "select").value).toBe("refund-attempt-created");
   });
 });
 
@@ -384,9 +876,10 @@ describe("结算失败后的受控新 execution", () => {
       actions: [action("VOID_SETTLEMENT"), action("CREATE_SETTLEMENT_REPLACEMENT")],
       source: { adapter: "wow" },
     };
-    const view = await render(<SettlementsPage service={service({ listSettlements: vi.fn().mockResolvedValue({ items: [ready], pageSize: 10, nextCursor: null }) })} />);
+    const view = await render(<SettlementsPage service={service({ listSettlements: vi.fn().mockResolvedValue({ items: [ready], pageSize: 10, nextCursor: null }), getSettlement: vi.fn().mockResolvedValue(ready) })} />);
     const open = Array.from(view.querySelectorAll("button")).find((button) => button.textContent === "详情");
     await act(async () => { open?.click(); });
+    await flush();
     const voidButton = Array.from(view.querySelectorAll("button")).find((button) => button.textContent === "作废");
     const replacementButton = Array.from(view.querySelectorAll("button")).find((button) => button.textContent === "创建替代");
 

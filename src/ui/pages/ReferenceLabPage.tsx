@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Beaker, Clock3, FilePlus2, RefreshCw, Settings2 } from "lucide-react";
 import { createMoney, decimalToMinor } from "../../domain/money";
 import type { CapabilityDeclaration, ReferenceCommand, ReferenceCommandResult, ReferenceEnvironment } from "../../domain/models";
@@ -6,6 +6,7 @@ import type { PaymentWorkbenchService } from "../../services/workbench-service";
 import { token } from "../action-utils";
 import { DefinitionList, ErrorBlock, InlineNotice, LoadingBlock, SectionHeader } from "../components";
 import { formatTime } from "../format";
+import { referenceBusinessDate, referenceInstant } from "../reference-time";
 
 type ScriptKind = "channel-script" | "bill-read-script" | "notification-sender-script" | "settlement-executor-script";
 
@@ -31,6 +32,7 @@ function ScriptButtons({ busy, capability, onRead, onReset }: {
 
 export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService }) {
   const [environment, setEnvironment] = useState<ReferenceEnvironment>();
+  const lastReferenceTime = useRef<string | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>();
   const [result, setResult] = useState<ReferenceCommandResult>();
@@ -38,13 +40,13 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
     fixtureId: "reference-default", merchantId: "reference-merchant", channelId: "", actorAlias: "",
     paymentExpiry: "PT30M", unknownResultReviewAfter: "PT30M", feeRate: "0.01",
   });
-  const [clock, setClock] = useState({ instant: new Date().toISOString(), duration: "PT10M" });
+  const [clock, setClock] = useState({ instant: referenceInstant(), duration: "PT10M" });
   const [channel, setChannel] = useState({ channelId: "", outcome: "ACCEPT_THEN_SUCCESS" });
   const [bill, setBill] = useState({
     billId: token("bill"), revision: "1", merchantId: "reference-merchant", channelId: "",
-    currency: "CNY", businessDate: new Date().toISOString().slice(0, 10), businessTimezone: "Asia/Shanghai",
+    currency: "CNY", businessDate: referenceBusinessDate(referenceInstant(), "Asia/Shanghai"), businessTimezone: "Asia/Shanghai",
     idempotencyKey: token("bill-register"), recordId: token("bill-record"), transactionKind: "PAYMENT",
-    externalTransactionId: "", amount: "100.00", status: "SUCCESS", occurredAt: new Date().toISOString(),
+    externalTransactionId: "", amount: "100.00", status: "SUCCESS", occurredAt: referenceInstant(),
   });
   const [billScript, setBillScript] = useState({ billId: "", revision: "1", unavailableReadCount: "1" });
   const [notificationSender, setNotificationSender] = useState({
@@ -62,12 +64,21 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
   const settlementCapability = capability("settlement-executor-script");
   const fixtureId = environmentForm.fixtureId;
 
+  function syncBusinessClock(value: ReferenceEnvironment) {
+    const instant = referenceInstant(value.currentTime);
+    const businessTimezone = value.policy?.businessTimezone ?? "Asia/Shanghai";
+    setClock((old) => ({ ...old, instant }));
+    setBill((old) => ({ ...old, occurredAt: instant, businessTimezone, businessDate: referenceBusinessDate(instant, businessTimezone) }));
+  }
+
   async function refresh() {
     setLoading(true);
     setError(undefined);
     try {
       const value = await service.getReferenceEnvironment();
       setEnvironment(value);
+      if (lastReferenceTime.current !== value.currentTime) syncBusinessClock(value);
+      lastReferenceTime.current = value.currentTime ?? undefined;
       setEnvironmentForm((old) => ({
         ...old, fixtureId: value.fixtureId, merchantId: value.merchantId, channelId: value.channelId,
         actorAlias: value.actorAlias, paymentExpiry: value.policy?.paymentExpiry ?? old.paymentExpiry,
@@ -230,6 +241,8 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
     </div>
 
     <section className="panel"><h3><FilePlus2 size={18} />发布单条记录账单 revision</h3>
+      <InlineNotice>业务日期和记录发生时间默认采用 Reference Lab 逻辑时钟；修改时钟后将同步，手动编辑后可随时重新同步。</InlineNotice>
+      <button className="button button--small" type="button" disabled={!environment} onClick={() => { if (environment) syncBusinessClock(environment); }}>从逻辑时钟同步账单时间</button>
       <form className="form-grid" onSubmit={registerBill}>
         <label><span>Bill ID</span><input required value={bill.billId} onChange={(e) => setBill({ ...bill, billId: e.target.value })} /></label>
         <label><span>Revision</span><input required type="number" min="1" value={bill.revision} onChange={(e) => setBill({ ...bill, revision: e.target.value })} /></label>
@@ -242,6 +255,7 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
         <label className="span-2"><span>外部交易号</span><input required value={bill.externalTransactionId} onChange={(e) => setBill({ ...bill, externalTransactionId: e.target.value })} /></label>
         <label><span>金额</span><input required value={bill.amount} onChange={(e) => setBill({ ...bill, amount: e.target.value })} /></label>
         <label><span>状态</span><select value={bill.status} onChange={(e) => setBill({ ...bill, status: e.target.value })}><option>SUCCESS</option><option>FAILURE</option></select></label>
+        <label className="span-2"><span>记录发生时间（ISO）</span><input required value={bill.occurredAt} onChange={(e) => setBill({ ...bill, occurredAt: e.target.value })} /></label>
         <label className="span-2"><span>幂等键</span><input required value={bill.idempotencyKey} onChange={(e) => setBill({ ...bill, idempotencyKey: e.target.value })} /></label>
         <button className="button button--danger span-2" disabled={loading} type="submit">发布 immutable revision</button>
       </form>

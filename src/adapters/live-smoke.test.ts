@@ -120,6 +120,7 @@ describe.skipIf(backend !== "wow" && backend !== "cap4k")("live payment adapter 
     await waitForTerminal(service.getOperation.bind(service), refundReceipt);
     const refundId = refundReceipt.resource?.resourceId;
     expect(refundId).toBeTruthy();
+    await eventually(() => service.getRefund(refundId!), () => true);
 
     const refundAttemptReceipt = await service.execute({
       type: "CREATE_REFUND_ATTEMPT",

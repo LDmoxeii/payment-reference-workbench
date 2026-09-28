@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BusinessError } from "../domain/errors";
 import type { Operation, OperationReceipt, Payment } from "../domain/models";
 import type { PaymentWorkbenchService } from "./workbench-service";
-import { observeReceipt } from "./workbench-service";
+import { AcceptedObservationError, observeReceipt } from "./workbench-service";
 
 function receipt(mode: OperationReceipt["readAfter"]["mode"]): OperationReceipt {
   return {
@@ -117,5 +117,36 @@ describe("OperationReceipt observation", () => {
     });
     expect(result.operation.status).toBe("SUCCEEDED");
     expect(result).not.toHaveProperty("resource");
+  });
+
+  it("READ_ONCE preserves a completed Operation when its projection is not ready, then reads it on resume", async () => {
+    const getOperation = vi.fn().mockResolvedValue(operation("SUCCEEDED"));
+    const getPayment = vi.fn().mockRejectedValueOnce(new BusinessError({
+      code: "RESOURCE_NOT_READY", message: "projection is catching up", fields: [], retryable: true,
+    })).mockResolvedValueOnce(payment);
+    const service = { getOperation, getPayment } as unknown as PaymentWorkbenchService;
+
+    const pending = await observeReceipt(service, receipt("READ_ONCE"));
+    expect(pending).toMatchObject({
+      operation: { status: "SUCCEEDED" }, timedOut: true,
+      observationError: { code: "RESOURCE_NOT_READY", retryable: true },
+    });
+    const resumed = await observeReceipt(service, receipt("READ_ONCE"));
+    expect(resumed).toMatchObject({ operation: { status: "SUCCEEDED" }, resource: payment, timedOut: false });
+  });
+
+  it("distinguishes an accepted command's Operation read failure from a synchronous rejection", async () => {
+    const service = { getOperation: vi.fn().mockRejectedValue(new Error("network unavailable")) } as unknown as PaymentWorkbenchService;
+    try {
+      await observeReceipt(service, receipt("READ_ONCE"));
+      throw new Error("expected accepted observation to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AcceptedObservationError);
+      expect(error).toMatchObject({
+        name: "AcceptedObservationError",
+        receipt: { operationId: "op-1" },
+        observationError: { code: "OBSERVATION_FAILED", retryable: true },
+      });
+    }
   });
 });

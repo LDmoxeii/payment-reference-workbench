@@ -9,6 +9,7 @@ import { ReferenceLabPage } from "./pages/ReferenceLabPage";
 import { RefundsPage } from "./pages/RefundsPage";
 import { ReviewsPage } from "./pages/ReviewsPage";
 import { SettlementsPage } from "./pages/SettlementsPage";
+import { WorkbenchNoticeProvider } from "./WorkbenchNotice";
 
 interface Props {
   service: PaymentWorkbenchService;
@@ -40,7 +41,7 @@ export function WorkbenchApp({ service, config }: Props) {
   function navigate(next: WorkbenchPage) { setPage(next); window.location.hash = next; setMobileOpen(false); }
   useEffect(() => { const onHash = () => setPage(initialPage()); window.addEventListener("hashchange", onHash); return () => window.removeEventListener("hashchange", onHash); }, []);
 
-  return <div className="app-shell"><aside className={`sidebar ${mobileOpen ? "sidebar--open" : ""}`}><div className="brand"><div className="brand__mark"><CreditCard size={21} /></div><div><strong>支付参考工作台</strong><span>Unified Payment Reference</span></div><button type="button" className="sidebar-close" onClick={() => setMobileOpen(false)} title="关闭导航"><X size={20} /></button></div>
+  return <WorkbenchNoticeProvider resetKey={page}><div className="app-shell"><aside className={`sidebar ${mobileOpen ? "sidebar--open" : ""}`}><div className="brand"><div className="brand__mark"><CreditCard size={21} /></div><div><strong>支付参考工作台</strong><span>Unified Payment Reference</span></div><button type="button" className="sidebar-close" onClick={() => setMobileOpen(false)} title="关闭导航"><X size={20} /></button></div>
     <nav>{nav.map((item) => { const Icon = item.icon; return <button type="button" key={item.id} className={page === item.id ? "active" : ""} onClick={() => navigate(item.id)}><Icon size={18} /><span>{item.label}</span></button>; })}</nav>
     <div className="sidebar__connection"><Server size={17} /><div><strong>{service.profile.label}</strong><span>{config.apiBaseUrl}</span></div></div></aside>
     {mobileOpen ? <button className="sidebar-backdrop" type="button" aria-label="关闭导航" onClick={() => setMobileOpen(false)} /> : null}
@@ -54,5 +55,5 @@ export function WorkbenchApp({ service, config }: Props) {
       {page === "reference" ? <ReferenceLabPage service={service} /> : null}
       {page === "alignment" ? <AlignmentPage service={service} /> : null}
     </div></main>
-  </div>;
+  </div></WorkbenchNoticeProvider>;
 }

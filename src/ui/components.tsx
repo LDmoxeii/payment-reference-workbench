@@ -1,8 +1,10 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { AlertCircle, Inbox, LoaderCircle, RefreshCw } from "lucide-react";
 import { BusinessError } from "../domain/errors";
 import type { ApiErrorShape, Operation, OperationReceipt } from "../domain/models";
+import { AcceptedObservationError } from "../services/workbench-service";
 import { formatTime, statusLabel, statusTone } from "./format";
+import { useWorkbenchNotice } from "./WorkbenchNotice";
 
 export function StatusBadge({ status }: { status?: string | null }) {
   return <span className={`status status--${statusTone(status)}`}>{statusLabel(status)}</span>;
@@ -21,13 +23,17 @@ export function EmptyBlock({ title, detail }: { title: string; detail?: string }
 }
 
 export function ErrorBlock({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
+  const { showError } = useWorkbenchNotice();
+  useEffect(() => { showError(error); }, [error, showError]);
   const business = error instanceof BusinessError ? error : null;
+  const observation = error instanceof AcceptedObservationError ? error.observationError : null;
+  const apiError = business ?? observation;
   const message = error instanceof Error ? error.message : "请求失败";
   return <div className="error-block" role="alert"><AlertCircle size={20} /><div className="error-block__body">
     <strong>{message}</strong>
-    {business ? <span>{business.code} · {business.retryable ? "可安全重试" : "请检查输入或当前业务状态"}{business.correlationId ? ` · correlation ${business.correlationId}` : ""}</span> : <span>网络或客户端异常</span>}
-    {business?.fields.map((field) => <span key={`${field.field}:${field.code ?? ""}`}>{field.field}：{field.message}</span>)}
-    {business && (business.details !== undefined || business.diagnostic !== undefined || business.sourceMessage) ? <details><summary>错误详情与源诊断</summary>{business.sourceMessage ? <pre>{business.sourceMessage}</pre> : null}{business.details !== undefined ? <pre>{diagnosticText(business.details)}</pre> : null}{business.diagnostic !== undefined ? <pre>{diagnosticText(business.diagnostic)}</pre> : null}</details> : null}
+    {apiError ? <span>{apiError.code} · {apiError.retryable ? "可安全重试" : "请检查输入或当前业务状态"}{apiError.correlationId ? ` · correlation ${apiError.correlationId}` : ""}</span> : <span>网络或客户端异常</span>}
+    {apiError?.fields.map((field) => <span key={`${field.field}:${field.code ?? ""}`}>{field.field}：{field.message}</span>)}
+    {apiError && (apiError.details !== undefined || apiError.diagnostic !== undefined || apiError.sourceMessage) ? <details><summary>错误详情与源诊断</summary>{apiError.sourceMessage ? <pre>{apiError.sourceMessage}</pre> : null}{apiError.details !== undefined ? <pre>{diagnosticText(apiError.details)}</pre> : null}{apiError.diagnostic !== undefined ? <pre>{diagnosticText(apiError.diagnostic)}</pre> : null}</details> : null}
   </div>{onRetry ? <button className="icon-button" type="button" onClick={onRetry} title="重试"><RefreshCw size={17} /></button> : null}</div>;
 }
 
@@ -53,6 +59,8 @@ export function InlineNotice({ tone = "info", children }: { tone?: "info" | "suc
 }
 
 export function CommandFeedback({ receipt, operation, timedOut, observationError, onContinue, busy = false }: { receipt?: OperationReceipt; operation?: Operation; timedOut?: boolean; observationError?: ApiErrorShape; onContinue?: () => void; busy?: boolean }) {
+  const { showError } = useWorkbenchNotice();
+  useEffect(() => { if (receipt && observationError) showError(observationError); }, [receipt, observationError, showError]);
   if (!receipt) return null;
   return <section className="panel"><SectionHeader title="最近一次命令" description="受理回执、异步 Operation 与业务资源是三个独立层次。" />
     <DefinitionList items={[
@@ -61,7 +69,7 @@ export function CommandFeedback({ receipt, operation, timedOut, observationError
       { label: "资源", value: receipt.resource ? <code>{receipt.resource.resourceType}:{receipt.resource.resourceId}</code> : "—" }, { label: "Read after", value: receipt.readAfter.mode },
       { label: "受理时间", value: formatTime(receipt.acceptedAt) }, { label: "Correlation", value: <code>{receipt.correlationId ?? "—"}</code> },
     ]} />
-    {timedOut ? <><InlineNotice tone="warning"><span><strong>{observationError?.code ?? "OBSERVATION_TIMEOUT"}</strong> · 观察窗口已超时，但这不表示领域操作失败。可以继续使用同一 Operation ID 与资源引用观察。</span></InlineNotice>{observationError ? <details className="source-details"><summary>观察诊断</summary><DefinitionList items={[{ label: "稳定错误码", value: observationError.code }, { label: "可重试", value: observationError.retryable ? "是" : "否" }, { label: "Correlation", value: <code>{observationError.correlationId ?? receipt.correlationId ?? "—"}</code> }, { label: "详情", value: <pre>{diagnosticText(observationError.details)}</pre> }]} /></details> : null}{onContinue ? <button className="button button--small" type="button" disabled={busy} onClick={onContinue}><RefreshCw size={15} />继续观察同一 Operation</button> : null}</> : null}
+    {timedOut ? <><InlineNotice tone="warning"><span><strong>{observationError?.code ?? "OBSERVATION_TIMEOUT"}</strong> · {operation?.status === "SUCCEEDED" ? "命令已受理，Operation 已完成，但详情尚未更新或读取失败。可继续观察同一资源。" : "观察窗口已超时，但这不表示领域操作失败。可以继续使用同一 Operation ID 与资源引用观察。"}</span></InlineNotice>{observationError ? <details className="source-details"><summary>观察诊断</summary><DefinitionList items={[{ label: "稳定错误码", value: observationError.code }, { label: "可重试", value: observationError.retryable ? "是" : "否" }, { label: "Correlation", value: <code>{observationError.correlationId ?? receipt.correlationId ?? "—"}</code> }, { label: "详情", value: <pre>{diagnosticText(observationError.details)}</pre> }]} /></details> : null}{onContinue ? <button className="button button--small" type="button" disabled={busy} onClick={onContinue}><RefreshCw size={15} />继续观察同一 Operation</button> : null}</> : null}
     {operation?.error ? <details className="source-details"><summary>Operation 错误</summary><pre>{diagnosticText(operation.error)}</pre></details> : null}
   </section>;
 }

@@ -102,6 +102,7 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
 
   async getReferenceEnvironment(fixtureId = this.fixtureId): Promise<ReferenceEnvironment> {
     const fixture = await this.client.get<JsonRecord>(`/reference/fixtures/${pathId(fixtureId)}`);
+    const currentTime = await this.readFixtureClock(fixtureId);
     const channelId = arrayValue(fixture.allowedChannelIds).find((value): value is string => typeof value === "string") ?? "fake";
     return {
       fixtureId,
@@ -113,7 +114,7 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
         settlementOperator: "finance-operator",
         settlementReviewer: "finance-operator",
       },
-      currentTime: text(fixture.initialTime) ?? null,
+      currentTime,
       policy: object(fixture.policy) as ReferenceEnvironment["policy"],
       channelId,
       merchantId: "reference-merchant",
@@ -523,6 +524,12 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
       delete filters.resourceId;
     }
     return queryString({ ...filters, cursor: request.cursor, pageSize: request.pageSize, fixtureId: this.fixtureId });
+  }
+
+  private async readFixtureClock(fixtureId: string): Promise<string | null> {
+    // WOW has no read-only clock route; advancing by zero is an adapter-level compatibility read.
+    const response = await this.client.post<JsonRecord>(`/reference/fixtures/${pathId(fixtureId)}/clock`, { advanceBy: "PT0S" });
+    return text(response.instant) ?? null;
   }
 
   private billScriptPath(billId: string, revision: number): string {

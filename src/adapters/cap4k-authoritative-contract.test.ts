@@ -33,8 +33,9 @@ const receipt = {
 
 describe("CAP4K 对齐后的公开 HTTP 契约", () => {
   it("GET 权威账单保留升序历史、completeness、指纹、原始记录及 Money", async () => {
+    const resourceId = "01900000-0000-7000-8000-000000000001";
     const mock = capture(() => ({
-      billId: "bill/1", billIdentity: "reference-bill",
+      billId: resourceId, billIdentity: "reference-bill",
       channelId: "C-001", currency: "CNY", businessDate: "2026-09-26",
       businessTimezone: "Asia/Shanghai", createdAt: "2026-09-26T00:00:00Z",
       currentRevision: "2", currentRevisionId: "revision-2",
@@ -59,11 +60,11 @@ describe("CAP4K 对齐后的公开 HTTP 契约", () => {
     }));
     const adapter = new Cap4kPaymentAdapter({ apiBaseUrl: "/backend/api", fetchImpl: mock.fetchImpl });
 
-    const bill = await adapter.getBill("bill/1");
+    const bill = await adapter.getBill(resourceId);
 
-    expect(mock.calls).toMatchObject([{ path: "/backend/api/authoritative-bills/bill%2F1", method: "GET" }]);
+    expect(mock.calls).toMatchObject([{ path: `/backend/api/authoritative-bills/${resourceId}`, method: "GET" }]);
     expect(bill).toMatchObject({
-      billId: "bill/1", currentRevision: "2", currentRevisionId: "revision-2",
+      billId: "reference-bill", currentRevision: "2", currentRevisionId: "revision-2",
       businessTimezone: "Asia/Shanghai",
       revisions: [
         {
@@ -80,6 +81,71 @@ describe("CAP4K 对齐后的公开 HTTP 契约", () => {
       ],
     });
     expect(adapter.profile.capabilities.find((item) => item.id === "bill-detail")?.level).toBe("full");
+  });
+
+  it("用公开 Run 搜索摘要将业务 billIdentity 解析为 UUID，再读取权威详情", async () => {
+    const resourceId = "01900000-0000-7000-8000-000000000001";
+    const mock = capture((path) => path.endsWith("/reconciliation-runs/search")
+      ? { items: [{ runId: "run-1", billId: resourceId }], nextCursor: null, pageSize: 100 }
+      : { billId: resourceId, billIdentity: "reference-bill", channelId: "C-001", currency: "CNY", revisions: [{ revision: "2", records: [] }] });
+    const adapter = new Cap4kPaymentAdapter({ apiBaseUrl: "/backend/api", fetchImpl: mock.fetchImpl });
+
+    const bill = await adapter.getBill("reference-bill");
+
+    expect(bill.billId).toBe("reference-bill");
+    expect(bill.revisions?.[0]?.billId).toBe("reference-bill");
+    expect(mock.calls.map(({ path, method }) => [method, path])).toEqual([
+      ["POST", "/backend/api/reconciliation-runs/search"],
+      ["GET", `/backend/api/authoritative-bills/${resourceId}`],
+      ["GET", `/backend/api/authoritative-bills/${resourceId}`],
+    ]);
+    expect(mock.calls[0]?.body).toEqual({ merchantId: "", pageSize: 100 });
+  });
+
+  it("搜索所有 cursor 才确认业务账单身份唯一，并稳定报告不存在或歧义", async () => {
+    const firstId = "01900000-0000-7000-8000-000000000001";
+    const secondId = "01900000-0000-7000-8000-000000000002";
+    const pages: Array<{ items: { billId: string }[]; nextCursor: string | null; pageSize: number }> = [
+      { items: [{ billId: firstId }], nextCursor: "cursor-2", pageSize: 1 },
+      { items: [{ billId: secondId }], nextCursor: null, pageSize: 1 },
+    ];
+    let searchCount = 0;
+    const paged = capture((path) => path.endsWith("/reconciliation-runs/search")
+      ? pages[searchCount++]
+      : { billId: path.endsWith(firstId) ? firstId : secondId, billIdentity: "shared-bill", revisions: [] });
+    const ambiguous = new Cap4kPaymentAdapter({ apiBaseUrl: "/backend/api", fetchImpl: paged.fetchImpl });
+
+    await expect(ambiguous.getBill("shared-bill")).rejects.toMatchObject({
+      code: "BILL_IDENTITY_AMBIGUOUS",
+      retryable: false,
+      details: { resourceIds: [firstId, secondId] },
+    });
+    expect(paged.calls.filter(({ path }) => path.endsWith("/reconciliation-runs/search"))).toHaveLength(2);
+
+    const missing = capture(() => ({ items: [], nextCursor: null, pageSize: 100 }));
+    await expect(new Cap4kPaymentAdapter({ apiBaseUrl: "/backend/api", fetchImpl: missing.fetchImpl }).getBill("missing-bill"))
+      .rejects.toMatchObject({ code: "BILL_IDENTITY_UNRESOLVABLE", retryable: false });
+  });
+
+  it("未产生 Run 的同一会话账单由登记响应提供 UUID", async () => {
+    const resourceId = "01900000-0000-7000-8000-000000000003";
+    const mock = capture((path) => path.endsWith("/reference-fixtures/bills")
+      ? { billId: resourceId, billIdentity: "registered-bill", revision: "1" }
+      : path.endsWith("/reconciliation-runs/search")
+        ? { items: [], nextCursor: null, pageSize: 100 }
+        : { billId: resourceId, billIdentity: "registered-bill", revisions: [] });
+    const adapter = new Cap4kPaymentAdapter({ apiBaseUrl: "/backend/api", fetchImpl: mock.fetchImpl });
+    await adapter.executeReference({
+      type: "REGISTER_BILL",
+      input: {
+        billId: "registered-bill", revision: 1, merchantId: "reference-merchant", channelId: "C-001",
+        currency: "CNY", businessDate: "2026-09-26", businessTimezone: "Asia/Shanghai",
+        idempotencyKey: "register-1", records: [],
+      },
+    });
+
+    await expect(adapter.getBill("registered-bill")).resolves.toMatchObject({ billId: "registered-bill" });
+    expect(mock.calls.at(-1)?.path).toBe(`/backend/api/authoritative-bills/${resourceId}`);
   });
 
   it("单支付到期关闭取权威 merchantId，POST 真实 receipt 且重放使用同一幂等键", async () => {

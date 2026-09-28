@@ -355,6 +355,7 @@ async function runSuccessfulClosureScenario(
   const requested = await service.execute(refundCommand);
   await waitForTerminal(service, requested);
   const refundId = requiredResourceId(requested, "success refund");
+  await eventually(() => service.getRefund(refundId), () => true);
   const refundReplay = await service.execute(refundCommand);
   await waitForTerminal(service, refundReplay);
   expect(refundReplay.resource?.resourceId).toBe(refundId);
@@ -770,6 +771,10 @@ async function runUnknownReviewScenario(
   );
 
   await service.executeReference({ type: "ADVANCE_CLOCK", input: { fixtureId: shared.fixtureId, duration: "PT2H" } });
+  const advancedEnvironment = await service.getReferenceEnvironment(shared.fixtureId);
+  expect(new Date(advancedEnvironment.currentTime!).toISOString()).toBe(
+    new Date(new Date(shared.scenarioInstant).getTime() + 2 * 60 * 60 * 1000).toISOString(),
+  );
   await service.executeReference({ type: "RUN_MAINTENANCE", input: { fixtureId: shared.fixtureId } });
   const review = await eventually(
     async () => findPaymentReview(service, shared.merchantId, paymentId),

@@ -73,11 +73,14 @@ const capabilities: BackendProfile["capabilities"] = [
   },
 ];
 
+const CAP4K_BILL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export class Cap4kPaymentAdapter implements PaymentBackendAdapter {
   readonly profile: BackendProfile;
   private readonly client: HttpClient;
   private readonly fixtureId: string;
   private readonly actorAlias: string;
+  private readonly registeredBillIds = new Map<string, Set<string>>();
 
   constructor(private readonly options: AdapterRuntimeOptions) {
     this.client = new HttpClient({ baseUrl: options.apiBaseUrl, fetchImpl: options.fetchImpl });
@@ -252,6 +255,10 @@ export class Cap4kPaymentAdapter implements PaymentBackendAdapter {
             rawEvidence: `reference://workbench/bills/${input.billId}/records/${item.recordId}`,
           })),
         });
+        this.rememberBillId(
+          requiredOne(response, ["billIdentity"], "登记账单响应缺少业务身份。"),
+          requiredOne(response, ["billId"], "登记账单响应缺少资源 ID。"),
+        );
         return { effect: "applied", summary: "CAP4K 权威账单 revision 已登记。", data: response };
       }
       case "RUN_MAINTENANCE": {
@@ -447,8 +454,18 @@ export class Cap4kPaymentAdapter implements PaymentBackendAdapter {
   }
 
   async getBill(billId: string): Promise<AuthoritativeBill> {
-    const value = await this.client.get<JsonRecord>(`/authoritative-bills/${pathId(billId)}`);
-    const id = requiredOne(value, ["billId", "billIdentity"], "权威账单响应缺少 billId。");
+    const resourceId = await this.resolveBillId(billId);
+    const value = await this.client.get<JsonRecord>(`/authoritative-bills/${pathId(resourceId)}`);
+    const id = requiredOne(value, ["billIdentity"], "权威账单响应缺少业务身份。");
+    if (!CAP4K_BILL_UUID.test(billId) && id !== billId) {
+      throw new BusinessError({
+        code: "BILL_IDENTITY_MISMATCH",
+        message: "账单查询返回了与请求不同的业务身份。",
+        fields: [],
+        retryable: false,
+        details: { requestedBillId: billId, actualBillId: id, resourceId },
+      });
+    }
     const currency = text(value.currency) ?? "CNY";
     const revisions = records(value.revisions).map((revision) => {
       const completeness = text(revision.completeness) ?? null;
@@ -492,6 +509,57 @@ export class Cap4kPaymentAdapter implements PaymentBackendAdapter {
       revisions,
       source: source("cap4k", value, id),
     };
+  }
+
+  private rememberBillId(billIdentity: string, resourceId: string): void {
+    const ids = this.registeredBillIds.get(billIdentity) ?? new Set<string>();
+    ids.add(resourceId);
+    this.registeredBillIds.set(billIdentity, ids);
+  }
+
+  private async resolveBillId(billIdentity: string): Promise<string> {
+    // CAP4K's bill detail route accepts only the aggregate UUID. Its Run
+    // search exposes that UUID, while billIdentity is the public business key.
+    if (CAP4K_BILL_UUID.test(billIdentity)) return billIdentity;
+    const matches = new Set(this.registeredBillIds.get(billIdentity));
+    const checkedIds = new Set<string>();
+    const cursors = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const page: PageResult<string> = mapPage<string>(
+        await this.client.post<unknown>("/reconciliation-runs/search", { merchantId: "", ...(cursor ? { cursor } : {}), pageSize: 100 }),
+        (item) => requiredOne(item, ["billId"], "对账列表缺少账单资源 ID。"),
+      );
+      const candidates = [...new Set(page.items)].filter((id) => !checkedIds.has(id));
+      candidates.forEach((id) => checkedIds.add(id));
+      await Promise.all(candidates.map(async (id) => {
+        const value = await this.client.get<JsonRecord>(`/authoritative-bills/${pathId(id)}`);
+        if (requiredOne(value, ["billIdentity"], "权威账单响应缺少业务身份。") === billIdentity) {
+          matches.add(id);
+        }
+      }));
+      cursor = page.nextCursor ?? null;
+      if (cursor && cursors.has(cursor)) {
+        throw new BusinessError({
+          code: "ADAPTER_RESPONSE_INVALID",
+          message: "对账列表返回重复 cursor，无法完整解析账单身份。",
+          fields: [],
+          retryable: false,
+          diagnostic: { billIdentity, cursor },
+        });
+      }
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
+    if (matches.size === 1) return [...matches][0]!;
+    throw new BusinessError({
+      code: matches.size === 0 ? "BILL_IDENTITY_UNRESOLVABLE" : "BILL_IDENTITY_AMBIGUOUS",
+      message: matches.size === 0
+        ? "公开 Run 列表中无法解析该业务账单身份；尚未产生 Run 的既有账单需要使用资源 UUID 查询。"
+        : "多个渠道账单使用相同业务身份，无法唯一确定权威账单。",
+      fields: [],
+      retryable: false,
+      details: { billIdentity, resourceIds: [...matches].sort() },
+    });
   }
 
   getReconciliationRun(runId: string): Promise<ReconciliationRun> {
@@ -651,6 +719,8 @@ export class Cap4kPaymentAdapter implements PaymentBackendAdapter {
       announcedRevision: String(input.revision),
       publishedAt,
     });
+    const registeredBillId = text(signal.billId);
+    if (registeredBillId) this.rememberBillId(input.billId, registeredBillId);
     const runId = text(signal.runId);
     if (!runId) throw new BusinessError({ code: "REFERENCE_RUN_NOT_CREATED", message: text(signal.diagnostic) ?? "账单信号未产生 ReconciliationRun。", fields: [], retryable: true, diagnostic: signal });
     return this.postReceipt(`/reconciliation-runs/${pathId(runId)}/reruns`, { idempotencyKey: input.idempotencyKey }, { type: "ReconciliationRun", id: runId }, this.actorHeaders(this.actorAlias));

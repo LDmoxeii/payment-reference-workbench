@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Landmark, RefreshCw, Search, Send } from "lucide-react";
 import type { BusinessCommand, ChannelOutcome, Settlement } from "../../domain/models";
 import type { PaymentWorkbenchService } from "../../services/workbench-service";
@@ -6,6 +6,7 @@ import { canExecute, confirmAction, findAction, token } from "../action-utils";
 import { AuthoritativeList } from "../AuthoritativeList";
 import { CommandFeedback, DefinitionList, EmptyBlock, ErrorBlock, InlineNotice, LoadingBlock, SectionHeader, SourceDetails, StatusBadge } from "../components";
 import { formatMoney, formatTime } from "../format";
+import { referenceInstant, referencePeriod } from "../reference-time";
 import { useCommandExecution } from "../useCommandExecution";
 
 const newExecutionForm = (channelId = "") => ({ executionId: token("execution"), channelId, idempotencyKey: token("execute"), reviewAfterMinutes: "30" });
@@ -18,31 +19,86 @@ export function SettlementsPage({ service }: { service: PaymentWorkbenchService 
   const [error, setError] = useState<unknown>();
   const [notice, setNotice] = useState<string>();
   const [refreshKey, setRefreshKey] = useState(0);
-  const [prepare, setPrepare] = useState({ merchantId: "reference-merchant", channelId: "", currency: "CNY", periodStart: new Date(Date.now() - 86400000).toISOString(), periodEnd: new Date().toISOString(), businessTimezone: "Asia/Shanghai", settlementId: "", idempotencyKey: token("settlement") });
+  const selectedSettlementId = useRef("");
+  const settlementRequestSequence = useRef(0);
+  const [prepare, setPrepare] = useState({ merchantId: "reference-merchant", channelId: "", currency: "CNY", ...referencePeriod(), businessTimezone: "Asia/Shanghai", settlementId: "", idempotencyKey: token("settlement") });
   const [responsibility, setResponsibility] = useState({ actorAlias: "fixture-settlement-operator", actorId: "reference-settlement-operator", actorRole: "SETTLEMENT_OPERATOR", reason: "依据已确认对账事实推进结算", evidenceRefs: "reference:settlement-evidence", idempotencyKey: token("settlement-action") });
   const [executionForm, setExecutionForm] = useState(newExecutionForm);
-  const [result, setResult] = useState({ attemptId: "", channelId: "", resultIdentity: token("settlement-result"), externalTransactionId: token("external-settlement"), executionGroupIdentity: "", requestIdentity: "", outcome: "SUCCESS" as ChannelOutcome, occurredAt: new Date().toISOString() });
+  const [result, setResult] = useState({ attemptId: "", channelId: "", resultIdentity: token("settlement-result"), externalTransactionId: token("external-settlement"), executionGroupIdentity: "", requestIdentity: "", outcome: "SUCCESS" as ChannelOutcome, occurredAt: referenceInstant() });
 
-  useEffect(() => { void service.getReferenceEnvironment().then((value) => { setPrepare((old) => ({ ...old, merchantId: value.merchantId, channelId: value.channelId })); setResponsibility((old) => ({ ...old, actorAlias: value.actorAliases?.settlementOperator ?? old.actorAlias })); setExecutionForm((old) => ({ ...old, channelId: value.channelId })); setResult((old) => ({ ...old, channelId: value.channelId })); }).catch(setError); }, [service]);
+  useEffect(() => { void service.getReferenceEnvironment().then((value) => {
+    setPrepare((old) => ({ ...old, merchantId: value.merchantId, channelId: value.channelId, businessTimezone: value.policy?.businessTimezone ?? old.businessTimezone, ...referencePeriod(value.currentTime) }));
+    setResponsibility((old) => ({ ...old, actorAlias: value.actorAliases?.settlementOperator ?? old.actorAlias }));
+    setExecutionForm((old) => ({ ...old, channelId: value.channelId }));
+    setResult((old) => ({ ...old, channelId: value.channelId, occurredAt: referenceInstant(value.currentTime) }));
+  }).catch(setError); }, [service]);
+
+  async function syncBusinessTime() {
+    try {
+      const value = await service.getReferenceEnvironment();
+      setPrepare((old) => ({ ...old, ...referencePeriod(value.currentTime) }));
+      setResult((old) => ({ ...old, occurredAt: referenceInstant(value.currentTime) }));
+      setNotice(`周期和结果时间已按 Reference Lab 逻辑时钟 ${referenceInstant(value.currentTime)} 更新。`);
+    } catch (cause) { setError(cause); }
+  }
 
   function apply(value: Settlement) {
+    selectedSettlementId.current = value.settlementId;
     setSettlement(value); setLookupId(value.settlementId);
     const latest = value.executions.at(-1);
     setExecutionForm((old) => ({ ...old, channelId: value.channelId ?? old.channelId }));
     if (latest) setResult((old) => ({ ...old, attemptId: latest.executionId, externalTransactionId: latest.externalSettlementId ?? old.externalTransactionId, executionGroupIdentity: latest.executionGroupIdentity ?? old.executionGroupIdentity, requestIdentity: latest.requestIdentity ?? old.requestIdentity, channelId: value.channelId ?? old.channelId }));
   }
-  async function load(id = lookupId) { if (!id.trim()) return; setLoading(true); setError(undefined); try { apply(await service.getSettlement(id.trim())); } catch (cause) { setError(cause); } finally { setLoading(false); } }
+  async function load(id = lookupId) {
+    const target = id.trim();
+    if (!target) return;
+    const requestId = ++settlementRequestSequence.current;
+    if (selectedSettlementId.current !== target) {
+      setSettlement(undefined);
+      setExecutionForm(newExecutionForm());
+      setResult((old) => ({
+        ...old, attemptId: "", channelId: "", externalTransactionId: "",
+        executionGroupIdentity: "", requestIdentity: "", resultIdentity: token("settlement-result"),
+      }));
+    }
+    selectedSettlementId.current = target;
+    setLookupId(target); setLoading(true); setError(undefined);
+    try {
+      const value = await service.getSettlement(target);
+      if (requestId === settlementRequestSequence.current && selectedSettlementId.current === target) apply(value);
+    } catch (cause) {
+      if (requestId === settlementRequestSequence.current && selectedSettlementId.current === target) setError(cause);
+    } finally {
+      if (requestId === settlementRequestSequence.current) setLoading(false);
+    }
+  }
   async function execute(command: BusinessCommand, label: string, id?: string): Promise<boolean> {
+    const priorSelection = selectedSettlementId.current;
+    ++settlementRequestSequence.current;
+    setLoading(false);
     setError(undefined); setNotice(`${label}已提交，正在观察 Operation。`);
-    try { const observed = await execution.run<Settlement>(command); if (observed.resource) apply(observed.resource); else if (id) await load(id); setRefreshKey((value) => value + 1); setNotice(observed.timedOut ? `${label}已受理但观察暂未收敛。` : `${label}已受理，Operation 为 ${observed.operation.status}。`); return Boolean(observed.resource) && !observed.timedOut && observed.operation.status !== "FAILED"; }
+    try {
+      const observed = await execution.run<Settlement>(command, id ? () => service.getSettlement(id) : undefined);
+      if (selectedSettlementId.current === priorSelection) {
+        if (observed.resource) apply(observed.resource);
+        else if (id && !observed.timedOut) await load(id);
+      }
+      setRefreshKey((value) => value + 1);
+      setNotice(observed.timedOut ? `${label}已受理但观察暂未收敛。` : `${label}已受理，Operation 为 ${observed.operation.status}。`);
+      return Boolean(observed.resource) && !observed.timedOut && observed.operation.status !== "FAILED";
+    }
     catch (cause) { setError(cause); return false; }
   }
   async function continueObservation() {
+    const priorSelection = selectedSettlementId.current;
     setError(undefined); setNotice("正在使用同一 Operation ID 继续观察。");
     try {
       const observed = await execution.resume<Settlement>();
-      if (observed.resource) apply(observed.resource);
-      else if (settlement) await load(settlement.settlementId);
+      if (selectedSettlementId.current === priorSelection) {
+        if (observed.resource && (!priorSelection || priorSelection === observed.resource.settlementId)) apply(observed.resource);
+        else if (settlement && !observed.timedOut) await load(settlement.settlementId);
+      }
+      if (!observed.timedOut) setRefreshKey((value) => value + 1);
       setNotice(observed.timedOut ? "Operation 仍未在本次窗口内收敛，可稍后再次继续观察。" : `Operation 已收敛为 ${observed.operation.status}。`);
     } catch (cause) { setError(cause); }
   }
@@ -55,14 +111,14 @@ export function SettlementsPage({ service }: { service: PaymentWorkbenchService 
     if (completed) setExecutionForm(newExecutionForm(executionForm.channelId));
   }
 
-  return <div className="page-stack"><SectionHeader title="结算" description="准备候选、确认冻结、执行与结果收敛；UNKNOWN 必须保持原 execution identity，不能重付。" />
+  return <div className="page-stack"><SectionHeader title="结算" description="准备候选、确认冻结、执行与结果收敛；UNKNOWN 必须保持原 execution identity，不能重付。" action={<button className="button button--small" type="button" onClick={() => void syncBusinessTime()}>从逻辑时钟同步时间</button>} />
     <div className="two-column-layout"><section className="panel"><h3><Landmark size={18} />准备结算</h3><form className="form-grid" onSubmit={(e) => { e.preventDefault(); void execute({ type: "PREPARE_SETTLEMENT", input: { merchantId: prepare.merchantId, channelId: prepare.channelId || undefined, currency: prepare.currency, periodStart: prepare.periodStart, periodEnd: prepare.periodEnd, businessTimezone: prepare.businessTimezone, settlementId: prepare.settlementId || undefined, idempotencyKey: prepare.idempotencyKey } }, "准备结算"); }}>
       <label><span>商户</span><input required value={prepare.merchantId} onChange={(e) => setPrepare({ ...prepare, merchantId: e.target.value })} /></label><label><span>币种</span><select value={prepare.currency} onChange={(e) => setPrepare({ ...prepare, currency: e.target.value })}><option>CNY</option></select></label><label><span>渠道（可选）</span><input value={prepare.channelId} onChange={(e) => setPrepare({ ...prepare, channelId: e.target.value })} /></label><label><span>业务时区</span><input required value={prepare.businessTimezone} onChange={(e) => setPrepare({ ...prepare, businessTimezone: e.target.value })} /></label><label><span>周期开始（ISO）</span><input required value={prepare.periodStart} onChange={(e) => setPrepare({ ...prepare, periodStart: e.target.value })} /></label><label><span>周期结束（ISO）</span><input required value={prepare.periodEnd} onChange={(e) => setPrepare({ ...prepare, periodEnd: e.target.value })} /></label><label><span>Settlement ID（可选）</span><input value={prepare.settlementId} onChange={(e) => setPrepare({ ...prepare, settlementId: e.target.value })} /></label><label><span>幂等键</span><input required value={prepare.idempotencyKey} onChange={(e) => setPrepare({ ...prepare, idempotencyKey: e.target.value })} /></label><button className="button button--primary span-2" disabled={execution.busy} type="submit">准备结算候选</button>
     </form></section><section className="panel"><h3><Search size={18} />查询结算</h3><form className="lookup-form" onSubmit={(e) => { e.preventDefault(); void load(); }}><input value={lookupId} onChange={(e) => setLookupId(e.target.value)} placeholder="Settlement ID" /><button className="button" type="submit">查询</button></form><InlineNotice>确认后 scope、items、金额与 version 冻结；作废或替代不能绕过成功事实和 UNKNOWN 阻断。</InlineNotice></section></div>
-    {notice ? <InlineNotice tone={execution.timedOut ? "warning" : "info"}>{notice}</InlineNotice> : null}{error ? <ErrorBlock error={error} onRetry={settlement ? () => void load(settlement.settlementId) : undefined} /> : null}{loading || execution.busy ? <LoadingBlock /> : null}<CommandFeedback receipt={execution.receipt} operation={execution.operation} timedOut={execution.timedOut} observationError={execution.observationError} onContinue={() => void continueObservation()} busy={execution.busy} />
-    <AuthoritativeList title="Settlement 权威列表" description="后端返回的 Page 与 cursor 是列表唯一权威来源。" loadPage={(page) => service.listSettlements(page)} itemKey={(item) => item.settlementId} specificFilters={[{ key: "channelId", label: "渠道" }, { key: "currency", label: "币种" }, { key: "period", label: "结算周期" }, { key: "executionStatus", label: "执行状态" }]} columns={["Settlement", "商户", "周期", "净额", "状态", "最终性", ""]} onOpen={apply} refreshKey={refreshKey} renderRow={(item, open) => <><td><code>{item.settlementId}</code></td><td>{item.merchantId}</td><td>{item.periodStart ?? "—"} → {item.periodEnd ?? "—"}</td><td>{formatMoney(item.netAmount)}</td><td><StatusBadge status={item.status} /></td><td><StatusBadge status={item.finality} /></td><td><button className="button button--small" type="button" onClick={open}>详情</button></td></>} />
+    {notice ? <InlineNotice tone={execution.timedOut ? "warning" : "info"}>{notice}</InlineNotice> : null}{error ? <ErrorBlock error={error} onRetry={selectedSettlementId.current ? () => void load(selectedSettlementId.current) : undefined} /> : null}{loading ? <LoadingBlock label="正在读取结算权威详情" /> : null}{execution.busy ? <LoadingBlock /> : null}<CommandFeedback receipt={execution.receipt} operation={execution.operation} timedOut={execution.timedOut} observationError={execution.observationError} onContinue={() => void continueObservation()} busy={execution.busy} />
+    <AuthoritativeList title="Settlement 权威列表" description="后端返回的 Page 与 cursor 是列表唯一权威来源。" loadPage={(page) => service.listSettlements(page)} itemKey={(item) => item.settlementId} specificFilters={[{ key: "channelId", label: "渠道" }, { key: "currency", label: "币种" }, { key: "period", label: "结算周期" }, { key: "executionStatus", label: "执行状态" }]} columns={["Settlement", "商户", "周期", "净额", "状态", "最终性", ""]} onOpen={(item) => void load(item.settlementId)} refreshKey={refreshKey} renderRow={(item, open) => <><td><code>{item.settlementId}</code></td><td>{item.merchantId}</td><td>{item.periodStart ?? "—"} → {item.periodEnd ?? "—"}</td><td>{formatMoney(item.netAmount)}</td><td><StatusBadge status={item.status} /></td><td><StatusBadge status={item.finality} /></td><td><button className="button button--small" type="button" onClick={open}>详情</button></td></>} />
     {settlement ? <><section className="detail-heading"><div><span>结算详情</span><h2 className="mono-title">{settlement.settlementId}</h2></div><div><StatusBadge status={settlement.status} /><StatusBadge status={settlement.finality} /><button className="icon-button" type="button" onClick={() => void load(settlement.settlementId)}><RefreshCw size={16} /></button></div></section>
-      <section className="detail-band"><DefinitionList items={[{ label: "商户", value: settlement.merchantId }, { label: "渠道", value: settlement.channelId ?? "—" }, { label: "Scope", value: <code>{settlement.scopeId ?? "—"}</code> }, { label: "Version", value: String(settlement.version ?? "—") }, { label: "周期", value: `${settlement.periodStart ?? "—"} → ${settlement.periodEnd ?? "—"}` }, { label: "业务时区", value: settlement.businessTimezone ?? "—" }, { label: "阻断", value: settlement.blockerSummary ?? "—" }, { label: "替代关系", value: <code>{settlement.predecessorSettlementId ?? "—"} → {settlement.replacementSettlementId ?? "—"}</code> }]} /><div className="money-summary"><div><span>收入</span><strong>{formatMoney(settlement.grossAmount)}</strong></div><div><span>退款</span><strong>{formatMoney(settlement.refundAmount)}</strong></div><div><span>费用 / 调整</span><strong>{formatMoney(settlement.feeAmount)} / {formatMoney(settlement.adjustmentAmount)}</strong></div><div><span>净额</span><strong>{formatMoney(settlement.netAmount)}</strong></div></div><SourceDetails source={settlement.source} /></section>
+      <section className="detail-band"><DefinitionList items={[{ label: "商户", value: settlement.merchantId }, { label: "渠道", value: settlement.channelId ?? "—" }, { label: "Scope", value: <code>{settlement.scopeId ?? "—"}</code> }, { label: "Version", value: String(settlement.version ?? "—") }, { label: "周期", value: `${settlement.periodStart ?? "—"} → ${settlement.periodEnd ?? "—"}` }, { label: "业务时区", value: settlement.businessTimezone ?? "—" }, { label: settlement.finality === "FINAL" ? "历史诊断" : "当前阻断", value: settlement.blockerSummary ?? "—" }, { label: "替代关系", value: <code>{settlement.predecessorSettlementId ?? "—"} → {settlement.replacementSettlementId ?? "—"}</code> }]} /><div className="money-summary"><div><span>收入</span><strong>{formatMoney(settlement.grossAmount)}</strong></div><div><span>退款</span><strong>{formatMoney(settlement.refundAmount)}</strong></div><div><span>费用 / 调整</span><strong>{formatMoney(settlement.feeAmount)} / {formatMoney(settlement.adjustmentAmount)}</strong></div><div><span>净额</span><strong>{formatMoney(settlement.netAmount)}</strong></div></div><SourceDetails source={settlement.source} /></section>
       <section><SectionHeader title="结算构成" description="每个候选均保留来源、INCLUDED/EXCLUDED 和 reason code。" />{settlement.items.length === 0 ? <EmptyBlock title="暂无结算 item" /> : <div className="data-table-wrap"><table className="data-table"><thead><tr><th>Item</th><th>来源</th><th>业务对象</th><th>处置</th><th>金额影响</th><th>原因</th></tr></thead><tbody>{settlement.items.map((item) => <tr key={item.settlementItemId}><td><code>{item.settlementItemId}</code></td><td>{item.sourceKind}</td><td><code>{item.paymentId ?? item.refundId ?? item.sourceIdentity ?? "—"}</code></td><td>{item.disposition}</td><td>{formatMoney(item.amountImpact)}</td><td>{item.reasonCode}</td></tr>)}</tbody></table></div>}</section>
       <section><SectionHeader title="执行记录" />{settlement.executions.length === 0 ? <EmptyBlock title="尚无结算执行" /> : <div className="timeline-list">{settlement.executions.map((item) => <article className="timeline-item" key={item.executionId}><div className="timeline-item__icon"><Send size={16} /></div><div><div className="item-title"><code>{item.executionId}</code><StatusBadge status={item.status} /></div><p>{formatMoney(item.money)} · {item.externalSettlementId ?? "尚无外部结算号"}</p><span>{formatTime(item.submittedAt)} · group {item.executionGroupIdentity ?? "—"} · request {item.requestIdentity ?? "—"} · {item.receipts.length} 个结果收件</span>{item.receipts.map((receipt) => <div className="receipt-row" key={receipt.receiptId}><code>{receipt.resultIdentity}</code><span>{receipt.disposition ?? receipt.outcome ?? "已记录"}</span><span>{receipt.externalTransactionId ?? formatTime(receipt.recordedAt)}</span></div>)}</div></article>)}</div>}</section>
       <section className="panel"><h3>责任字段</h3><div className="form-grid"><label><span>Actor alias</span><input value={responsibility.actorAlias} onChange={(e) => setResponsibility({ ...responsibility, actorAlias: e.target.value })} /></label><label><span>Actor ID</span><input value={responsibility.actorId} onChange={(e) => setResponsibility({ ...responsibility, actorId: e.target.value })} /></label><label><span>Actor role</span><input value={responsibility.actorRole} onChange={(e) => setResponsibility({ ...responsibility, actorRole: e.target.value })} /></label><label><span>幂等键</span><input value={responsibility.idempotencyKey} onChange={(e) => setResponsibility({ ...responsibility, idempotencyKey: e.target.value })} /></label><label className="span-2"><span>原因</span><input value={responsibility.reason} onChange={(e) => setResponsibility({ ...responsibility, reason: e.target.value })} /></label><label className="span-2"><span>证据引用（逗号分隔）</span><input value={responsibility.evidenceRefs} onChange={(e) => setResponsibility({ ...responsibility, evidenceRefs: e.target.value })} /></label></div></section>

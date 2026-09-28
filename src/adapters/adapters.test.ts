@@ -302,9 +302,108 @@ describe("统一协议映射", () => {
     });
 
     expect(payment.actions.find((item) => item.kind === "RECEIVE_PAYMENT_RESULT")).toMatchObject({ executable: true, availability: "full" });
-    expect(payment.actions.some((item) => item.kind === "CREATE_PAYMENT_ATTEMPT")).toBe(false);
+    expect(payment.actions.find((item) => item.kind === "CREATE_PAYMENT_ATTEMPT")).toMatchObject({
+      executable: false,
+      reason: "当前业务状态不允许创建新 attempt。",
+    });
     expect(refund.actions.find((item) => item.kind === "RECEIVE_REFUND_RESULT")).toMatchObject({ executable: true, availability: "full" });
-    expect(refund.actions.some((item) => item.kind === "CREATE_REFUND_ATTEMPT")).toBe(false);
+    expect(refund.actions.find((item) => item.kind === "CREATE_REFUND_ATTEMPT")).toMatchObject({
+      executable: false,
+      reason: "当前业务状态不允许创建新 attempt。",
+    });
+  });
+
+  it("将 CAP4K Attempt 级受理事实映射为统一 submission receipt，并关闭重复提交", () => {
+    const payment = mapPayment("cap4k", {
+      paymentId: "pay-cap4k-accepted", merchantId: "merchant-1", merchantOrderNumber: "order-1",
+      money: { currency: "CNY", amountMinor: "1000" }, paymentMethod: "CARD", status: "PROCESSING", finality: "NON_FINAL",
+      attempts: [{ paymentAttemptId: "payment-attempt-1", channelId: "C-001", status: "ACCEPTED", requestIdentity: "payment-request-1", acceptedAt: "2026-09-28T00:00:00Z" }],
+    });
+    const refund = mapRefund("cap4k", {
+      refundId: "refund-cap4k-accepted", paymentId: payment.paymentId, merchantId: "merchant-1", merchantRefundNumber: "refund-1",
+      money: { currency: "CNY", amountMinor: "200" }, status: "PROCESSING", finality: "NON_FINAL",
+      attempts: [{ refundAttemptId: "refund-attempt-1", channelId: "C-001", status: "ACCEPTED", requestIdentity: "refund-request-1", acceptedAt: "2026-09-28T00:00:00Z", channelRefundId: "channel-refund-1" }],
+    });
+
+    expect(payment.attempts[0]?.submissions[0]).toMatchObject({
+      submissionId: "payment-request-1", requestIdentity: "payment-request-1", channelId: "C-001", outcome: "ACCEPTED",
+    });
+    expect(refund.attempts[0]?.submissions[0]).toMatchObject({
+      submissionId: "refund-request-1", requestIdentity: "refund-request-1", channelReference: "channel-refund-1", outcome: "ACCEPTED",
+    });
+    expect(payment.actions.find((item) => item.kind === "SUBMIT_PAYMENT_ATTEMPT")).toMatchObject({ executable: false, reason: "当前 attempt 已提交，请等待结果。" });
+    expect(refund.actions.find((item) => item.kind === "SUBMIT_REFUND_ATTEMPT")).toMatchObject({ executable: false, reason: "当前 attempt 已提交，请等待结果。" });
+  });
+
+  it("WOW 创建后 PROCESSING 的支付与退款 attempt 只有 requestIdentity 时仍可提交", () => {
+    const payment = mapPayment("wow", {
+      paymentId: "pay-wow-created", merchantId: "merchant-1", merchantOrderNo: "order-created",
+      amount: { currency: "CNY", amountMinor: "1000" }, paymentMethod: "DEFAULT", status: "PROCESSING", finality: "NON_FINAL",
+      attempts: [{ attemptId: "payment-attempt-created", channelId: "fake", status: "PROCESSING", requestIdentity: "payment-create-request" }],
+    });
+    const refund = mapRefund("wow", {
+      refundId: "refund-wow-created", paymentId: payment.paymentId, merchantId: "merchant-1", merchantRefundNo: "refund-created",
+      amount: { currency: "CNY", amountMinor: "200" }, status: "PROCESSING", finality: "NON_FINAL",
+      attempts: [{ attemptId: "refund-attempt-created", channelId: "fake", status: "PROCESSING", requestIdentity: "refund-create-request" }],
+    });
+
+    expect(payment.attempts[0]?.submissions).toEqual([]);
+    expect(refund.attempts[0]?.submissions).toEqual([]);
+    expect(payment.actions.find((item) => item.kind === "SUBMIT_PAYMENT_ATTEMPT")).toMatchObject({ executable: true });
+    expect(refund.actions.find((item) => item.kind === "SUBMIT_REFUND_ATTEMPT")).toMatchObject({ executable: true });
+  });
+
+  it("明确的提交字段或权威回执仍保留支付与退款提交历史", () => {
+    const payment = mapPayment("wow", {
+      paymentId: "pay-wow-submitted", merchantId: "merchant-1", merchantOrderNo: "order-submitted",
+      amount: { currency: "CNY", amountMinor: "1000" }, paymentMethod: "DEFAULT", status: "PROCESSING", finality: "NON_FINAL",
+      attempts: [{
+        attemptId: "payment-attempt-submitted", channelId: "fake", status: "PROCESSING",
+        requestIdentity: "payment-create-request", submittedAt: "2026-09-28T01:00:00Z",
+      }],
+    });
+    const refund = mapRefund("wow", {
+      refundId: "refund-wow-submitted", paymentId: payment.paymentId, merchantId: "merchant-1", merchantRefundNo: "refund-submitted",
+      amount: { currency: "CNY", amountMinor: "200" }, status: "PROCESSING", finality: "NON_FINAL",
+      attempts: [{
+        attemptId: "refund-attempt-submitted", channelId: "fake", status: "PROCESSING",
+        requestIdentity: "refund-create-request",
+        submissionReceipts: [{
+          submissionIdentity: "refund-submission-1", requestIdentity: "refund-create-request",
+          channelId: "fake", outcome: "ACCEPTED", submittedAt: "2026-09-28T01:00:00Z",
+        }],
+      }],
+    });
+
+    expect(payment.attempts[0]?.submissions).toHaveLength(1);
+    expect(payment.attempts[0]?.submissions[0]).toMatchObject({ submittedAt: "2026-09-28T01:00:00Z" });
+    expect(refund.attempts[0]?.submissions).toMatchObject([{ submissionId: "refund-submission-1", outcome: "ACCEPTED" }]);
+    expect(payment.actions.find((item) => item.kind === "SUBMIT_PAYMENT_ATTEMPT")).toMatchObject({ executable: false });
+    expect(refund.actions.find((item) => item.kind === "SUBMIT_REFUND_ATTEMPT")).toMatchObject({ executable: false });
+  });
+
+  it("CAP4K Attempt 进入终态后仍保留提交历史，未提交 Attempt 不伪造回执", () => {
+    const payment = mapPayment("cap4k", {
+      paymentId: "pay-terminal", merchantId: "merchant-1", merchantOrderNumber: "order-terminal",
+      money: { currency: "CNY", amountMinor: "1000" }, paymentMethod: "CARD", status: "SUCCEEDED", finality: "FINAL",
+      attempts: [
+        { paymentAttemptId: "payment-succeeded", channelId: "C-001", status: "SUCCEEDED", requestIdentity: "payment-request-1", acceptedAt: "2026-09-28T00:00:00Z" },
+        { paymentAttemptId: "payment-created", channelId: "C-001", status: "CREATED", requestIdentity: "creation-only" },
+      ],
+    });
+    const refund = mapRefund("cap4k", {
+      refundId: "refund-terminal", paymentId: payment.paymentId, merchantId: "merchant-1", merchantRefundNumber: "refund-terminal",
+      money: { currency: "CNY", amountMinor: "200" }, status: "FAILED", finality: "FINAL",
+      attempts: [
+        { refundAttemptId: "refund-failed", channelId: "C-001", status: "FAILED", submissionIdentity: "refund-submission-1", channelRefundId: "channel-refund-1" },
+        { refundAttemptId: "refund-created", channelId: "C-001", status: "CREATED" },
+      ],
+    });
+
+    expect(payment.attempts[0]?.submissions).toMatchObject([{ submissionId: "payment-request-1", requestIdentity: "payment-request-1" }]);
+    expect(payment.attempts[1]?.submissions).toEqual([]);
+    expect(refund.attempts[0]?.submissions).toMatchObject([{ submissionId: "refund-submission-1", channelReference: "channel-refund-1" }]);
+    expect(refund.attempts[1]?.submissions).toEqual([]);
   });
 });
 
@@ -375,6 +474,64 @@ describe("适配器注册与支付命令", () => {
     });
   });
 
+  it("WOW reference environment 以零时长时钟响应读取当前时间，保留其他 fixture 映射", async () => {
+    const mock = recordedFetch((call) => call.init.method === "GET"
+      ? {
+        fixtureId: "fixture/a",
+        initialTime: "2024-01-01T00:00:00Z",
+        allowedChannelIds: ["channel-1"],
+        policy: { paymentExpiry: "PT10M" },
+      }
+      : { fixtureId: "fixture/a", instant: "2047-01-01T00:00:00Z" });
+    const adapter = new WowPaymentAdapter({ apiBaseUrl: "/backend/api", fetchImpl: mock.fetchImpl });
+
+    const environment = await adapter.getReferenceEnvironment("fixture/a");
+
+    expect(environment).toMatchObject({
+      fixtureId: "fixture/a",
+      actorAlias: "finance-operator",
+      currentTime: "2047-01-01T00:00:00Z",
+      policy: { paymentExpiry: "PT10M" },
+      channelId: "channel-1",
+      merchantId: "reference-merchant",
+      paymentMethod: "DEFAULT",
+    });
+    expect(mock.calls).toMatchObject([
+      { url: "/backend/api/reference/fixtures/fixture%2Fa", init: { method: "GET" } },
+      {
+        url: "/backend/api/reference/fixtures/fixture%2Fa/clock",
+        init: { method: "POST" },
+        body: { advanceBy: "PT0S" },
+      },
+    ]);
+    expect(mock.calls).toHaveLength(2);
+  });
+
+  it("WOW 设置与推进时钟沿用 fixture clock 路由并返回服务端时间", async () => {
+    const mock = recordedFetch((call) => ({
+      fixtureId: "fixture/a",
+      instant: call.body?.instant ?? "2047-01-01T02:00:00Z",
+    }));
+    const adapter = new WowPaymentAdapter({ apiBaseUrl: "/backend/api", fetchImpl: mock.fetchImpl });
+
+    const set = await adapter.executeReference({
+      type: "SET_CLOCK",
+      input: { fixtureId: "fixture/a", instant: "2047-01-01T00:00:00Z" },
+    });
+    const advanced = await adapter.executeReference({
+      type: "ADVANCE_CLOCK",
+      input: { fixtureId: "fixture/a", duration: "PT2H" },
+    });
+
+    expect(set).toMatchObject({ effect: "applied", data: { fixtureId: "fixture/a", instant: "2047-01-01T00:00:00Z" } });
+    expect(advanced).toMatchObject({ effect: "applied", data: { fixtureId: "fixture/a", instant: "2047-01-01T02:00:00Z" } });
+    expect(mock.calls).toMatchObject([
+      { url: "/backend/api/reference/fixtures/fixture%2Fa/clock", init: { method: "POST" }, body: { instant: "2047-01-01T00:00:00Z" } },
+      { url: "/backend/api/reference/fixtures/fixture%2Fa/clock", init: { method: "POST" }, body: { advanceBy: "PT2H" } },
+    ]);
+    expect(mock.calls).toHaveLength(2);
+  });
+
   it("WOW 使用 merchantOrderNo、POLL receipt 与 amount Money 对象", async () => {
     const mock = recordedFetch(() => flatReceipt("Payment", "pay-wow"));
     const adapter = new WowPaymentAdapter({ apiBaseUrl: "/backend/api", fetchImpl: mock.fetchImpl, fixtureId: "fixture-a" });
@@ -419,8 +576,9 @@ describe("适配器注册与支付命令", () => {
   });
 
   it("CAP4K 对单支付到期和权威账单详情提供完整传输", async () => {
+    const billResourceId = "01900000-0000-7000-8000-000000000001";
     const mock = recordedFetch((call) => call.url.includes("/authoritative-bills/") ? {
-      billId: "bill-1",
+      billId: billResourceId,
       billIdentity: "bill-1",
       channelId: "C-001",
       currency: "CNY",
@@ -450,7 +608,7 @@ describe("适配器注册与支付命令", () => {
     const payment = await adapter.getPayment("pay-cap");
 
     expect(payment.actions.find((item) => item.kind === "CLOSE_EXPIRED_PAYMENT")).toMatchObject({ executable: true, availability: "full" });
-    await expect(adapter.getBill("bill-1")).resolves.toMatchObject({
+    await expect(adapter.getBill(billResourceId)).resolves.toMatchObject({
       billId: "bill-1",
       currentRevision: "1",
       revisions: [{ revision: "1", completeness: "COMPLETE", payloadFingerprint: "fingerprint-1" }],
@@ -519,7 +677,9 @@ describe("适配器注册与支付命令", () => {
   });
 
   it("CAP4K 透传账单暂不可读脚本，并提供通知 sender 脚本控制面", async () => {
-    const mock = recordedFetch(() => ({}));
+    const mock = recordedFetch((call) => call.url.endsWith("/reference-fixtures/bills")
+      ? { billId: "01900000-0000-7000-8000-000000000001", billIdentity: "bill-scripted" }
+      : {});
     const adapter = new Cap4kPaymentAdapter({ apiBaseUrl: "/backend/api", fetchImpl: mock.fetchImpl });
 
     await adapter.executeReference({

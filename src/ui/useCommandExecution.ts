@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import type { ApiErrorShape, BusinessCommand, Operation, OperationReceipt } from "../domain/models";
-import { observeReceipt, type ObserveResult, type PaymentWorkbenchService, type ReceiptResource } from "../services/workbench-service";
+import { AcceptedObservationError, observeReceipt, type ObserveResult, type PaymentWorkbenchService, type ReceiptResource } from "../services/workbench-service";
 
 export interface CommandExecution {
   busy: boolean;
@@ -20,28 +20,48 @@ export function useCommandExecution(service: PaymentWorkbenchService): CommandEx
   const [timedOut, setTimedOut] = useState(false);
   const [observationError, setObservationError] = useState<ApiErrorShape>();
   const readRef = useRef<(() => Promise<ReceiptResource>) | undefined>(undefined);
+  const generation = useRef(0);
 
   async function run<T extends ReceiptResource>(command: BusinessCommand, read?: () => Promise<T>): Promise<ObserveResult<T>> {
-    setBusy(true); setOperation(undefined); setTimedOut(false); setObservationError(undefined);
+    const current = ++generation.current;
+    setBusy(true); setReceipt(undefined); setOperation(undefined); setTimedOut(false); setObservationError(undefined);
+    readRef.current = undefined;
     try {
       const accepted = await service.execute(command);
-      setReceipt(accepted);
-      readRef.current = read as (() => Promise<ReceiptResource>) | undefined;
-      const observed = await observeReceipt<T>(service, accepted, { read });
-      setOperation(observed.operation); setTimedOut(observed.timedOut); setObservationError(observed.observationError);
+      if (generation.current === current) {
+        setReceipt(accepted);
+        readRef.current = read as (() => Promise<ReceiptResource>) | undefined;
+      }
+      const observed = await observeReceipt<T>(service, accepted, { read }).catch((error: unknown) => {
+        if (generation.current === current && error instanceof AcceptedObservationError) {
+          setTimedOut(true); setObservationError(error.observationError);
+        }
+        throw error;
+      });
+      if (generation.current === current) {
+        setOperation(observed.operation); setTimedOut(observed.timedOut); setObservationError(observed.observationError);
+      }
       return observed;
-    } finally { setBusy(false); }
+    } finally { if (generation.current === current) setBusy(false); }
   }
 
   async function resume<T extends ReceiptResource>(): Promise<ObserveResult<T>> {
     if (!receipt) throw new Error("没有可继续观察的 OperationReceipt。");
+    const current = ++generation.current;
     setBusy(true); setTimedOut(false); setObservationError(undefined);
     try {
-      const observed = await observeReceipt<T>(service, receipt, { read: readRef.current as (() => Promise<T>) | undefined });
-      setOperation(observed.operation); setTimedOut(observed.timedOut); setObservationError(observed.observationError);
+      const observed = await observeReceipt<T>(service, receipt, { read: readRef.current as (() => Promise<T>) | undefined }).catch((error: unknown) => {
+        if (generation.current === current && error instanceof AcceptedObservationError) {
+          setTimedOut(true); setObservationError(error.observationError);
+        }
+        throw error;
+      });
+      if (generation.current === current) {
+        setOperation(observed.operation); setTimedOut(observed.timedOut); setObservationError(observed.observationError);
+      }
       return observed;
-    } finally { setBusy(false); }
+    } finally { if (generation.current === current) setBusy(false); }
   }
 
-  return { busy, receipt, operation, timedOut, observationError, run, resume, clear: () => { setReceipt(undefined); setOperation(undefined); setTimedOut(false); setObservationError(undefined); readRef.current = undefined; } };
+  return { busy, receipt, operation, timedOut, observationError, run, resume, clear: () => { generation.current += 1; setBusy(false); setReceipt(undefined); setOperation(undefined); setTimedOut(false); setObservationError(undefined); readRef.current = undefined; } };
 }
