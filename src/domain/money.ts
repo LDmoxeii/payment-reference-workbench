@@ -3,7 +3,7 @@
 export interface Money {
   currency: string;
   /** Signed integer in the currency's minor unit. Never a JavaScript number. */
-  minorAmount: string;
+  amountMinor: string;
 }
 
 const CURRENCY_SCALE: Readonly<Record<string, number>> = {
@@ -28,9 +28,9 @@ export function normalizeMinorAmount(value: string): string {
   return negative && digits !== "0" ? `-${digits}` : digits;
 }
 
-export function createMoney(currency: string, minorAmount: string): Money {
+export function createMoney(currency: string, amountMinor: string): Money {
   currencyScale(currency);
-  return { currency: currency.toUpperCase(), minorAmount: normalizeMinorAmount(minorAmount) };
+  return { currency: currency.toUpperCase(), amountMinor: normalizeMinorAmount(amountMinor) };
 }
 
 /** Converts a human decimal string without using floating point arithmetic. */
@@ -71,10 +71,10 @@ export function minorToSafeInteger(minorAmount: string): number {
 }
 
 export function subtractMoney(total: Money, ...deductions: Array<Money | undefined>): Money | undefined {
-  let value = BigInt(total.minorAmount);
+  let value = BigInt(total.amountMinor);
   for (const deduction of deductions) {
     if (!deduction || deduction.currency !== total.currency) return undefined;
-    value -= BigInt(deduction.minorAmount);
+    value -= BigInt(deduction.amountMinor);
   }
   return createMoney(total.currency, value.toString());
 }

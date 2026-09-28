@@ -10,7 +10,8 @@ function backendId(value: string | undefined): BackendId {
 export const runtimeConfig = {
   backend: backendId(import.meta.env.VITE_PAYMENT_ADAPTER),
   apiBaseUrl: import.meta.env.VITE_API_BASE_URL || "/backend/api",
-  verificationMaterial: import.meta.env.VITE_CAP4K_VERIFICATION_MATERIAL || undefined,
+  fixtureId: import.meta.env.VITE_REFERENCE_FIXTURE_ID || "reference-default",
+  actorAlias: import.meta.env.VITE_REFERENCE_ACTOR_ALIAS || undefined,
 };
 
 export const workbenchService = createWorkbenchService(runtimeConfig);

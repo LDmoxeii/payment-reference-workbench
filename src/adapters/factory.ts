@@ -8,8 +8,10 @@ import { WowPaymentAdapter } from "./wow-adapter";
 export interface AdapterRuntimeOptions {
   apiBaseUrl: string;
   fetchImpl?: FetchLike;
-  /** Reference/sandbox material expected by CAP4K channel endpoints. */
-  verificationMaterial?: string;
+  /** Stable reference fixture selected by the workbench. */
+  fixtureId?: string;
+  /** Optional reconciliation actor alias. Responsibility commands still carry their action-specific alias. */
+  actorAlias?: string;
   /** Allows deterministic tests and an explicit expiry policy at the composition boundary. */
   now?: () => Date;
 }

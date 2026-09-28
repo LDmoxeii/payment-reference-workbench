@@ -1,484 +1,650 @@
-import { capabilityUnavailable, BusinessError } from "../domain/errors";
-import { minorToSafeInteger } from "../domain/money";
+import { BusinessError } from "../domain/errors";
 import type {
-  ActionDescriptor,
-  CreatePaymentInput,
-  CreateRefundInput,
-  ExecuteActionInput,
+  AuthoritativeBill,
+  BackendProfile,
+  BusinessCommand,
   HealthStatus,
+  ManualReviewItem,
+  MerchantNotification,
+  Operation,
   OperationReceipt,
   PageRequest,
   PageResult,
   Payment,
-  PaymentAttempt,
-  PaymentTrace,
-  Reconciliation,
-  ReconciliationItem,
+  PaymentTimeline,
+  ReconciliationRun,
+  ReferenceCommand,
+  ReferenceCommandResult,
+  ReferenceEnvironment,
   Refund,
-  RefundAttempt,
   Settlement,
-  SettlementLine,
-  SubmitPaymentResultInput,
-  SubmitRefundResultInput,
 } from "../domain/models";
-import { HttpClient, arrayValue, isRecord, numberValue, stringValue, type JsonRecord } from "../http/client";
+import { arrayValue, HttpClient, type JsonRecord } from "../http/client";
 import type { PaymentBackendAdapter } from "./adapter";
 import type { AdapterRuntimeOptions } from "./factory";
 import {
-  action,
-  capabilities,
-  channelReceipts,
-  mapAttemptStatus,
-  mapChannelResult,
-  mapPaymentStatus,
-  mapRefundStatus,
+  compact,
+  mapBill,
+  mapManualReview,
+  mapNotification,
+  mapOperation,
+  mapPage,
+  mapPayment,
+  mapReceipt,
+  mapReconciliationRun,
+  mapRefund,
+  mapSettlement,
+  mapTimeline,
+  object,
+  pathId,
+  queryString,
   records,
-  source,
-  unavailable,
-  wowMoney,
+  text,
+  toWireMoney,
 } from "./shared";
 
-const WOW_CAPABILITIES = capabilities([
-  ["payment.read", "full"],
-  ["payment.list", "unavailable", "WOW 当前没有权威支付列表或分页接口。"],
-  ["payment.create", "full"],
-  ["payment.attempt.start", "partial", "创建支付时由 WOW 自动选择配置并启动尝试；没有独立 start endpoint。", ["SUBMIT_PAYMENT_RESULT"]],
-  ["payment.channel-result", "full", undefined, ["SUBMIT_PAYMENT_RESULT"]],
-  ["payment.expire", "full", undefined, ["EXPIRE_PAYMENT"]],
-  ["payment.trace", "full", undefined, ["GET_PAYMENT_TRACE"]],
-  ["refund.read", "full"],
-  ["refund.list", "unavailable", "WOW 当前没有权威退款列表或分页接口。"],
-  ["refund.create", "partial", "Reference 退款在创建请求中选择 fake 渠道结果。", ["CREATE_REFUND"]],
-  ["refund.channel-result", "partial", "没有独立退款渠道结果入口；创建时的 result 驱动 fake adapter。"],
-  ["refund.adjudication", "full", undefined, ["ADJUDICATE_REFUND"]],
-  ["reconciliation.read", "full"],
-  ["reconciliation.reference-statement", "full", undefined, ["REGISTER_AUTHORITATIVE_STATEMENT", "MARK_BILL_AVAILABLE"]],
-  ["reconciliation.rerun", "unavailable", "WOW 没有公开的对账重跑端点。"],
-  ["settlement.read", "full"],
-  ["settlement.generate", "full", undefined, ["GENERATE_SETTLEMENT"]],
-  ["settlement.replace", "full", undefined, ["REPLACE_SETTLEMENT"]],
-  ["settlement.adjudication", "full", undefined, ["ADJUDICATE_SETTLEMENT"]],
-  ["browser.cors", "unavailable", "Reference 后端未配置浏览器 CORS；开发时请使用同源代理。"],
-]);
+const capabilities: BackendProfile["capabilities"] = [
+  { id: "payment", label: "payment", description: "支付意图、attempt、提交、可信结果与到期", level: "full" },
+  { id: "refund", label: "refund", description: "退款申请、attempt、结果与预算", level: "full" },
+  { id: "authoritative-lists", label: "authoritative-lists", description: "五类权威 keyset cursor 列表", level: "full" },
+  { id: "reconciliation", label: "reconciliation", description: "账单 revision、Run、差异处置与事实确认", level: "full" },
+  { id: "settlement", label: "settlement", description: "准备、冻结、执行三结果、作废与替代", level: "full" },
+  { id: "manual-review", label: "manual-review", description: "权威人工核对与责任处置", level: "full" },
+  { id: "notification", label: "notification", description: "稳定通知身份、投递历史与重试", level: "full" },
+  { id: "timeline", label: "timeline", description: "paymentId 全链路 trace", level: "full" },
+  { id: "reference-lab", label: "reference-lab", description: "fixture、policy、逻辑时钟、四类执行脚本及签名可信结果", level: "full" },
+  { id: "bill-detail", label: "bill-detail", description: "独立读取权威账单及 revisions", level: "full" },
+  { id: "channel-script", label: "channel-script", description: "按 fixture 和 channel 配置、读取与重置支付提交脚本", level: "full" },
+  { id: "payment-close-expired", label: "payment-close-expired", description: "按单个 payment 执行到期关闭", level: "full" },
+  { id: "reconciliation-complete", label: "reconciliation-complete", description: "显式完成已解除阻断的 Run", level: "full" },
+  { id: "bill-read-script", label: "bill-read-script", description: "按账单 revision 配置、读取与重置暂不可读次数", level: "full" },
+  { id: "notification-sender-script", label: "notification-sender-script", description: "按通知或来源事实配置、读取与重置投递结果脚本", level: "full" },
+  { id: "settlement-executor-script", label: "settlement-executor-script", description: "按 fixture 和 channel 配置、读取与重置结算执行脚本", level: "full" },
+  { id: "settlement-execution-identity", label: "settlement-execution-identity", description: "执行命令接受 caller-supplied executionId", level: "full" },
+];
 
-/** Maps WOW's event-projection API to the workbench's backend-neutral contract. */
 export class WowPaymentAdapter implements PaymentBackendAdapter {
-  readonly profile = {
-    id: "wow" as const,
-    label: "WOW Reference Payment",
-    apiBaseUrl: "",
-    referenceOnly: true as const,
-    capabilities: WOW_CAPABILITIES,
-  };
-
+  readonly profile: BackendProfile;
   private readonly client: HttpClient;
+  private readonly fixtureId: string;
 
   constructor(private readonly options: AdapterRuntimeOptions) {
     this.client = new HttpClient({ baseUrl: options.apiBaseUrl, fetchImpl: options.fetchImpl });
-    this.profile.apiBaseUrl = options.apiBaseUrl;
+    this.fixtureId = options.fixtureId ?? "reference-default";
+    this.profile = {
+      id: "wow",
+      label: "WOW Reference Payment",
+      apiBaseUrl: options.apiBaseUrl,
+      referenceOnly: true,
+      capabilities,
+      implementationDifferences: [
+        { topic: "命令收敛", unifiedMeaning: "OperationReceipt + readAfter", implementation: "事件提交后通过 POLL 观察 Projection" },
+        { topic: "权威列表", unifiedMeaning: "opaque keyset cursor", implementation: "GET collection + query parameters" },
+        { topic: "责任字段", unifiedMeaning: "actor/reason/evidence", implementation: "actorId/actorRole 放在命令 body" },
+        { topic: "可信回调", unifiedMeaning: "服务端验证 canonical callback", implementation: "先签发 fixture verificationToken，再提交结果" },
+        { topic: "全链路", unifiedMeaning: "payment timeline", implementation: "GET /payments/{id}/trace" },
+      ],
+    };
   }
 
   async health(): Promise<HealthStatus> {
     const checkedAt = new Date().toISOString();
     try {
-      // WOW has no health endpoint. A 404 from this real read route still proves that its HTTP server is reachable.
-      await this.client.get<JsonRecord>("/payments/__payment_workbench_probe__");
-      return health("connected", checkedAt, "已连接 WOW reference API。");
+      await this.client.get(`/reference/fixtures/${pathId(this.fixtureId)}/policy`);
+      return this.healthResult("connected", checkedAt, "WOW reference API 与 fixture 可访问。");
     } catch (error) {
       if (error instanceof BusinessError && error.httpStatus !== undefined) {
-        return health("connected", checkedAt, "WOW API 可访问（探针资源不存在属预期）。", String(error.httpStatus));
+        return this.healthResult("connected", checkedAt, "WOW API 可访问；当前 fixture 尚未登记，可在 Reference Lab 初始化。");
       }
-      return health("unreachable", checkedAt, "无法连接 WOW reference API。", "NETWORK_ERROR");
+      return this.healthResult("unreachable", checkedAt, "无法连接 WOW reference API。");
     }
   }
 
-  async createPayment(input: CreatePaymentInput): Promise<OperationReceipt> {
-    const body: JsonRecord = {
-      merchantId: input.merchantId,
-      merchantOrderNo: input.merchantOrderNo,
-      idempotencyKey: input.idempotencyKey,
-      amount: minorToSafeInteger(input.amount.minorAmount),
-      currency: input.amount.currency,
-      paymentMethod: input.paymentMethod,
-    };
-    if (input.expiresAt) body.expiresAt = input.expiresAt;
-    const response = await this.client.post<JsonRecord>("/payments", body);
-    return operationReceipt("payment", response, requiredId(response, "aggregateId"), "poll");
-  }
-
-  async getPayment(paymentId: string): Promise<Payment> {
-    return mapWowPayment(await this.client.get<JsonRecord>(`/payments/${pathId(paymentId)}`));
-  }
-
-  async listPayments(_request: PageRequest): Promise<PageResult<Payment>> {
-    throw capabilityUnavailable("WOW 当前没有权威支付列表或分页接口；请使用本地最近记录或按 ID 查询。");
-  }
-
-  async startPaymentAttempt(_paymentId: string): Promise<OperationReceipt> {
-    throw capabilityUnavailable("WOW 在创建支付时自动启动尝试，当前没有独立的支付尝试发起入口。");
-  }
-
-  async submitPaymentResult(input: SubmitPaymentResultInput): Promise<OperationReceipt> {
-    const response = await this.client.post<JsonRecord>(`/payments/${pathId(input.paymentId)}/results`, {
-      attemptId: input.attemptId,
-      notificationId: input.notificationId,
-      channel: input.channel,
-      channelTransactionId: input.channelTransactionId,
-      amount: minorToSafeInteger(input.amount.minorAmount),
-      currency: input.amount.currency,
-      result: input.result,
-      occurredAt: input.occurredAt ?? new Date().toISOString(),
-      receivedAt: new Date().toISOString(),
-      verified: input.verified ?? true,
-      payloadDigest: input.verificationMaterial ?? "payment-reference-workbench",
-      verificationSummary: "由支付业务工作台 reference 渠道模拟提交",
-    });
-    return operationReceipt("payment", response, input.paymentId, "poll");
-  }
-
-  async expirePayment(paymentId: string): Promise<OperationReceipt> {
-    const response = await this.client.post<JsonRecord>(`/payments/${pathId(paymentId)}/expire`);
-    return operationReceipt("payment", response, paymentId, "poll");
-  }
-
-  async createRefund(input: CreateRefundInput): Promise<OperationReceipt> {
-    const body: JsonRecord = {
-      merchantRefundNo: input.merchantRefundNo,
-      amount: minorToSafeInteger(input.amount.minorAmount),
-      result: input.initialResult ?? "SUCCEEDED",
-    };
-    if (input.requestedAt) body.requestedAt = input.requestedAt;
-    const response = await this.client.post<JsonRecord>(`/payments/${pathId(input.paymentId)}/refunds`, body);
-    return operationReceipt("refund", response, requiredId(response, "aggregateId"), "poll");
-  }
-
-  async getRefund(refundId: string): Promise<Refund> {
-    return mapWowRefund(await this.client.get<JsonRecord>(`/refunds/${pathId(refundId)}`));
-  }
-
-  async listRefunds(_request: PageRequest): Promise<PageResult<Refund>> {
-    throw capabilityUnavailable("WOW 当前没有权威退款列表或分页接口；请按退款 ID 查询。");
-  }
-
-  async submitRefundResult(_input: SubmitRefundResultInput): Promise<OperationReceipt> {
-    throw capabilityUnavailable("WOW 没有独立退款渠道结果入口；请在创建退款时指定 reference result，或对待复核退款执行裁决。");
-  }
-
-  async adjudicateRefund(refundId: string, payload: Record<string, unknown>): Promise<OperationReceipt> {
-    const response = await this.client.post<JsonRecord>(`/refunds/${pathId(refundId)}/adjudications`, payload);
-    return operationReceipt("refund", response, refundId, "poll");
-  }
-
-  async getPaymentTrace(paymentId: string): Promise<PaymentTrace> {
-    const response = await this.client.get<JsonRecord>(`/payments/${pathId(paymentId)}/trace`);
-    const payment = recordAt(response, "payment");
+  async getReferenceEnvironment(fixtureId = this.fixtureId): Promise<ReferenceEnvironment> {
+    const fixture = await this.client.get<JsonRecord>(`/reference/fixtures/${pathId(fixtureId)}`);
+    const channelId = arrayValue(fixture.allowedChannelIds).find((value): value is string => typeof value === "string") ?? "fake";
     return {
-      payment: mapWowPayment(payment),
-      refunds: records(response.refunds).map(mapWowRefund),
-      reconciliations: records(response.reconciliations).map(mapWowReconciliation),
-      settlements: records(response.settlements).map(mapWowSettlement),
-      notifications: records(response.notifications).map((notification) => ({
-        id: requiredId(notification, "notificationId"),
-        status: stringValue(notification.deliveryStatus),
-        diagnostic: stringValue(notification.diagnostic) ?? null,
-      })),
-      partial: false,
-      source: source("wow", response, paymentId),
+      fixtureId,
+      actorAlias: "finance-operator",
+      actorAliases: {
+        paymentReviewer: "finance-operator",
+        refundReviewer: "finance-operator",
+        reconciliationOperator: "finance-operator",
+        settlementOperator: "finance-operator",
+        settlementReviewer: "finance-operator",
+      },
+      currentTime: text(fixture.initialTime) ?? null,
+      policy: object(fixture.policy) as ReferenceEnvironment["policy"],
+      channelId,
+      merchantId: "reference-merchant",
+      paymentMethod: "DEFAULT",
     };
   }
 
-  async getReconciliation(batchId: string): Promise<Reconciliation> {
-    return mapWowReconciliation(await this.client.get<JsonRecord>(`/reconciliations/${pathId(batchId)}`));
-  }
-
-  async getSettlement(settlementId: string): Promise<Settlement> {
-    return mapWowSettlement(await this.client.get<JsonRecord>(`/settlements/${pathId(settlementId)}`));
-  }
-
-  async executeAction(input: ExecuteActionInput): Promise<OperationReceipt> {
-    const payload = input.payload ?? {};
-    switch (input.kind) {
-      case "EXPIRE_PAYMENT":
-        return this.expirePayment(requiredResourceId(input));
-      case "ADJUDICATE_REFUND":
-        return this.adjudicateRefund(requiredResourceId(input), payload);
-      case "REGISTER_AUTHORITATIVE_STATEMENT":
-        return this.postOperation("reconciliation", "/reference/statements", payload, stringValue(payload.statementId), "read_once");
-      case "MARK_BILL_AVAILABLE":
-        return this.postOperation("reconciliation", "/reconciliation/bill-available", payload, stringValue(payload.statementId), "poll");
-      case "GENERATE_SETTLEMENT":
-        return this.postOperation("settlement", "/settlements/generate", payload, stringValue(payload.settlementId), "poll");
-      case "REPLACE_SETTLEMENT":
-        return this.postOperation("settlement", `/settlements/${pathId(requiredResourceId(input))}/replace`, payload, requiredResourceId(input), "poll");
-      case "ADJUDICATE_SETTLEMENT":
-        return this.postOperation("settlement", `/settlements/${pathId(requiredResourceId(input))}/adjudications`, payload, requiredResourceId(input), "poll");
-      case "SUBMIT_PAYMENT_RESULT":
-      case "SUBMIT_REFUND_RESULT":
-      case "START_PAYMENT_ATTEMPT":
-      case "ADJUDICATE_PAYMENT":
-      case "CREATE_REFUND":
-      case "GET_PAYMENT_TRACE":
-      case "RERUN_RECONCILIATION":
-      case "DISPOSE_RECONCILIATION_DIFFERENCE":
-      case "PREPARE_SETTLEMENT":
-      case "CONFIRM_SETTLEMENT":
-      case "START_SETTLEMENT_EXECUTION":
-      case "SUBMIT_SETTLEMENT_RESULT":
-      case "VOID_SETTLEMENT":
-        throw capabilityUnavailable(`WOW 当前不支持通过通用操作执行 ${input.kind}；请使用对应的统一专用服务或查看能力说明。`);
+  async executeReference(command: ReferenceCommand): Promise<ReferenceCommandResult> {
+    switch (command.type) {
+      case "REGISTER_ENVIRONMENT": {
+        const input = command.input;
+        const fixture = await this.client.post<JsonRecord>("/reference/fixtures", {
+          fixtureId: input.fixtureId,
+          policy: input.policy,
+          initialTime: input.currentTime,
+          allowedChannelIds: [input.channelId],
+        });
+        const configuration = await this.client.post<JsonRecord>("/configurations", {
+          configurationId: `${input.fixtureId}-${input.merchantId}-${input.channelId}`,
+          merchantId: input.merchantId,
+          channelId: input.channelId,
+          currency: "CNY",
+          paymentMethod: input.paymentMethod ?? "DEFAULT",
+          idempotencyKey: `reference-environment:${input.fixtureId}:${input.merchantId}:${input.channelId}`,
+        });
+        return {
+          effect: "applied",
+          summary: `已登记 WOW fixture ${input.fixtureId} 与商户渠道配置。`,
+          receipt: mapReceipt("wow", configuration, { type: "ChannelConfiguration" }),
+          data: { fixture, configuration },
+        };
+      }
+      case "SET_CLOCK": {
+        const data = await this.client.post<JsonRecord>(`/reference/fixtures/${pathId(command.input.fixtureId)}/clock`, { instant: command.input.instant });
+        return { effect: "applied", summary: "逻辑时钟已设置。", data };
+      }
+      case "ADVANCE_CLOCK": {
+        const data = await this.client.post<JsonRecord>(`/reference/fixtures/${pathId(command.input.fixtureId)}/clock`, { advanceBy: command.input.duration });
+        return { effect: "applied", summary: "逻辑时钟已推进。", data };
+      }
+      case "CONFIGURE_CHANNEL": {
+        const input = command.input;
+        const data = await this.client.post(`/reference/payment-channel-scripts/${pathId(input.channelId)}`, {
+          fixtureId: input.fixtureId,
+          script: wowPaymentScript(input.outcome),
+        });
+        return { effect: "applied", summary: "WOW payment channel script 已配置。", data };
+      }
+      case "READ_CHANNEL_SCRIPT": {
+        const input = command.input;
+        const data = await this.client.get(`/reference/payment-channel-scripts/${pathId(input.channelId)}${queryString({ fixtureId: input.fixtureId })}`);
+        return { effect: "applied", summary: "已读取 WOW payment channel script。", data };
+      }
+      case "RESET_CHANNEL_SCRIPT": {
+        const input = command.input;
+        const data = await this.client.post(`/reference/payment-channel-scripts/${pathId(input.channelId)}/reset`, { fixtureId: input.fixtureId });
+        return { effect: "applied", summary: "WOW payment channel script 已重置。", data };
+      }
+      case "CONFIGURE_BILL_PROVIDER": {
+        const input = command.input;
+        const data = await this.client.post(this.billScriptPath(input.billId, input.revision), {
+          fixtureId: input.fixtureId,
+          unavailableReadCount: input.unavailableReadCount,
+        });
+        return { effect: "applied", summary: "WOW bill provider script 已配置。", data };
+      }
+      case "READ_BILL_PROVIDER_SCRIPT": {
+        const input = command.input;
+        const data = await this.client.get(`${this.billScriptPath(input.billId, input.revision)}${queryString({ fixtureId: input.fixtureId })}`);
+        return { effect: "applied", summary: "已读取 WOW bill provider script。", data };
+      }
+      case "RESET_BILL_PROVIDER_SCRIPT": {
+        const input = command.input;
+        const data = await this.client.post(`${this.billScriptPath(input.billId, input.revision)}/reset`, { fixtureId: input.fixtureId });
+        return { effect: "applied", summary: "WOW bill provider script 已重置。", data };
+      }
+      case "CONFIGURE_NOTIFICATION_SENDER": {
+        const input = command.input;
+        const data = await this.client.post("/reference/notification-sender-scripts", {
+          fixtureId: input.fixtureId,
+          selector: this.notificationSelector(input),
+          script: input.outcome,
+        });
+        return { effect: "applied", summary: "WOW notification sender script 已配置。", data };
+      }
+      case "READ_NOTIFICATION_SENDER_SCRIPT": {
+        const input = command.input;
+        const selector = this.notificationSelector(input);
+        const data = await this.client.get(`/reference/notification-sender-scripts${queryString({ fixtureId: input.fixtureId, ...selector })}`);
+        return { effect: "applied", summary: "已读取 WOW notification sender script。", data };
+      }
+      case "RESET_NOTIFICATION_SENDER_SCRIPT": {
+        const input = command.input;
+        const data = await this.client.post("/reference/notification-sender-scripts/reset", {
+          fixtureId: input.fixtureId,
+          selector: this.notificationSelector(input),
+        });
+        return { effect: "applied", summary: "WOW notification sender script 已重置。", data };
+      }
+      case "CONFIGURE_SETTLEMENT_EXECUTOR": {
+        const input = command.input;
+        const data = await this.client.post(`/reference/settlement-executor-scripts/${pathId(input.channelId)}`, {
+          fixtureId: input.fixtureId,
+          script: input.outcome,
+        });
+        return { effect: "applied", summary: "WOW settlement executor script 已配置；执行时以 caller executionId 消费。", data };
+      }
+      case "READ_SETTLEMENT_EXECUTOR_SCRIPT": {
+        const input = command.input;
+        const data = await this.client.get(`/reference/settlement-executor-scripts/${pathId(input.channelId)}${queryString({ fixtureId: input.fixtureId })}`);
+        return { effect: "applied", summary: "已读取 WOW settlement executor script。", data };
+      }
+      case "RESET_SETTLEMENT_EXECUTOR_SCRIPT": {
+        const input = command.input;
+        const data = await this.client.post(`/reference/settlement-executor-scripts/${pathId(input.channelId)}/reset`, { fixtureId: input.fixtureId });
+        return { effect: "applied", summary: "WOW settlement executor script 已重置。", data };
+      }
+      case "REGISTER_BILL": {
+        const input = command.input;
+        const response = await this.client.post<JsonRecord>("/reference/statements", {
+          statementId: input.billId,
+          revision: input.revision,
+          channelId: input.channelId,
+          currency: input.currency,
+          merchantId: input.merchantId,
+          idempotencyKey: input.idempotencyKey,
+          reconciliationDate: input.businessDate,
+          businessTimezone: input.businessTimezone,
+          records: input.records.map((item) => ({
+            recordId: item.recordId,
+            transactionKind: item.transactionKind,
+            externalTransactionId: item.externalTransactionId,
+            amount: toWireMoney(item.money),
+            status: item.status,
+            occurredAt: item.occurredAt,
+          })),
+          fixtureId: input.fixtureId ?? this.fixtureId,
+        });
+        const receipt = mapReceipt("wow", response, { type: "AuthoritativeBillRevision", id: `${input.billId}:${input.revision}` });
+        const script = input.unavailableReadCount === undefined ? undefined : await this.client.post(
+          this.billScriptPath(input.billId, input.revision),
+          { fixtureId: input.fixtureId ?? this.fixtureId, unavailableReadCount: input.unavailableReadCount },
+        );
+        return { effect: "applied", summary: "权威账单 revision 已登记，读取脚本已按需配置。", receipt, data: { bill: response, script } };
+      }
+      case "RUN_MAINTENANCE":
+        return { effect: "alternative", summary: "WOW 的到期、UNKNOWN 与对账推进通过显式业务命令和逻辑时钟观察完成。", data: command.input };
     }
   }
 
-  private async postOperation(
-    resourceType: OperationReceipt["resourceType"],
-    path: string,
-    payload: Record<string, unknown>,
-    fallbackId: string | undefined,
-    refresh: OperationReceipt["refresh"],
-  ): Promise<OperationReceipt> {
-    const response = await this.client.post<JsonRecord>(path, payload);
-    return operationReceipt(resourceType, response, fallbackId ?? requiredOperationId(response), refresh);
+  async execute(command: BusinessCommand): Promise<OperationReceipt> {
+    switch (command.type) {
+      case "CREATE_PAYMENT": {
+        const input = command.input;
+        return this.postReceipt("/payments", compact({
+          merchantId: input.merchantId,
+          merchantOrderNo: input.merchantOrderId,
+          idempotencyKey: input.idempotencyKey,
+          amount: toWireMoney(input.money),
+          paymentMethod: input.paymentMethod,
+          expiresAt: input.expiresAt,
+          fixtureId: input.fixtureId ?? this.fixtureId,
+        }), { type: "Payment" });
+      }
+      case "CREATE_PAYMENT_ATTEMPT": {
+        const input = command.input;
+        return this.postReceipt(`/payments/${pathId(input.resourceId)}/attempts`, compact({
+          idempotencyKey: input.idempotencyKey,
+          attemptId: input.attemptId,
+          paymentMethod: input.paymentMethod,
+          riskReason: input.riskReason,
+        }), { type: "Payment", id: input.resourceId });
+      }
+      case "SUBMIT_PAYMENT_ATTEMPT": {
+        const input = command.input;
+        return this.postReceipt(`/payments/${pathId(input.resourceId)}/attempts/${pathId(input.attemptId)}/submissions`, {
+          idempotencyKey: input.idempotencyKey,
+          submissionId: input.submissionId ?? input.idempotencyKey,
+          fixtureId: this.fixtureId,
+        }, { type: "Payment", id: input.resourceId });
+      }
+      case "RECEIVE_PAYMENT_RESULT":
+        return this.receiveSignedResult(command.input, `/payments/${pathId(command.input.resourceId)}/results`, "Payment");
+      case "CLOSE_EXPIRED_PAYMENT":
+        return this.postReceipt(`/payments/${pathId(command.input.paymentId)}/expire`, undefined, { type: "Payment", id: command.input.paymentId });
+      case "REQUEST_REFUND": {
+        const input = command.input;
+        return this.postReceipt(`/payments/${pathId(input.paymentId)}/refunds`, compact({
+          merchantId: input.merchantId,
+          merchantRefundNo: input.merchantRefundId,
+          idempotencyKey: input.idempotencyKey,
+          amount: toWireMoney(input.money),
+          reason: input.reason,
+          requestedAt: input.requestedAt,
+          fixtureId: input.fixtureId ?? this.fixtureId,
+        }), { type: "Refund" });
+      }
+      case "CREATE_REFUND_ATTEMPT": {
+        const input = command.input;
+        return this.postReceipt(`/refunds/${pathId(input.resourceId)}/attempts`, compact({
+          idempotencyKey: input.idempotencyKey,
+          attemptId: input.attemptId,
+          fixtureId: input.fixtureId ?? this.fixtureId,
+        }), { type: "Refund", id: input.resourceId });
+      }
+      case "SUBMIT_REFUND_ATTEMPT": {
+        const input = command.input;
+        return this.postReceipt(`/refunds/${pathId(input.resourceId)}/attempts/${pathId(input.attemptId)}/submissions`, {
+          idempotencyKey: input.idempotencyKey,
+          submissionId: input.submissionId ?? input.idempotencyKey,
+        }, { type: "Refund", id: input.resourceId });
+      }
+      case "RECEIVE_REFUND_RESULT":
+        return this.receiveSignedResult(command.input, `/refunds/${pathId(command.input.resourceId)}/results`, "Refund");
+      case "SIGNAL_BILL_AVAILABLE": {
+        const input = command.input;
+        return this.postReceipt("/reconciliation/bill-available", {
+          statementId: input.billId,
+          revision: input.revision,
+          merchantId: input.merchantId,
+          signalIdentity: input.signalIdentity,
+          idempotencyKey: input.idempotencyKey,
+          readAttemptIdentity: input.idempotencyKey,
+          fixtureId: this.fixtureId,
+        }, { type: "AuthoritativeBill", id: input.billId });
+      }
+      case "RUN_RECONCILIATION": {
+        const input = command.input;
+        return this.postReceipt("/reconciliation-runs", {
+          merchantId: input.merchantId,
+          statementId: input.billId,
+          revision: input.revision,
+          idempotencyKey: input.idempotencyKey,
+          runId: input.runId,
+        }, { type: "ReconciliationRun", id: input.runId });
+      }
+      case "RERUN_RECONCILIATION": {
+        const input = command.input;
+        return this.postReceipt("/reconciliation-runs/reruns", {
+          merchantId: input.merchantId,
+          statementId: input.billId,
+          revision: input.revision,
+          idempotencyKey: input.idempotencyKey,
+          runId: input.runId,
+        }, { type: "ReconciliationRun", id: input.runId });
+      }
+      case "DISPOSE_RECONCILIATION_DIFFERENCE": {
+        const input = command.input;
+        const responsibility = this.responsibilityBody(input, "RECONCILIATION_REVIEWER", true);
+        return this.postReceipt(`/reconciliation-runs/${pathId(input.runId)}/differences/dispositions`, {
+          ...responsibility,
+          revision: input.revision,
+          differenceIdentity: input.differenceId,
+          conclusion: wowReconciliationConclusion(input.conclusion),
+          settlementImpact: wowSettlementImpact(input.settlementImpact),
+        }, { type: "ReconciliationRun", id: input.runId });
+      }
+      case "CONFIRM_RECONCILIATION_FACT": {
+        const input = command.input;
+        const responsibility = this.responsibilityBody(input, "RECONCILIATION_REVIEWER", true);
+        return this.postReceipt(`/reconciliation-runs/${pathId(input.runId)}/differences/confirmations`, {
+          ...responsibility,
+          revision: input.revision,
+          differenceIdentity: input.differenceId,
+          confirmation: input.confirmation ?? {},
+        }, { type: "ReconciliationRun", id: input.runId });
+      }
+      case "COMPLETE_RECONCILIATION": {
+        const input = command.input;
+        this.responsibilityBody(input, "RECONCILIATION_REVIEWER");
+        return this.postReceipt(`/reconciliation-runs/${pathId(input.runId)}/complete`, {
+          merchantId: input.merchantId,
+          idempotencyKey: input.idempotencyKey,
+        }, { type: "ReconciliationRun", id: input.runId });
+      }
+      case "PREPARE_SETTLEMENT": {
+        const input = command.input;
+        return this.postReceipt("/settlements/prepare", {
+          merchantId: input.merchantId,
+          currency: input.currency,
+          channelId: input.channelId ?? "fake",
+          reconciliationDate: businessDateBefore(input.periodEnd, input.businessTimezone),
+          businessTimezone: input.businessTimezone,
+          settlementId: input.settlementId,
+          idempotencyKey: input.idempotencyKey,
+          fixtureId: input.fixtureId ?? this.fixtureId,
+        }, { type: "Settlement", id: input.settlementId });
+      }
+      case "CONFIRM_SETTLEMENT": {
+        const input = command.input;
+        return this.postReceipt(`/settlements/${pathId(input.settlementId)}/confirm`, this.responsibilityBody(input), { type: "Settlement", id: input.settlementId });
+      }
+      case "EXECUTE_SETTLEMENT": {
+        const input = command.input;
+        return this.postReceipt(`/settlements/${pathId(input.settlementId)}/executions`, {
+          merchantId: input.merchantId,
+          executionId: input.executionId,
+          idempotencyKey: input.idempotencyKey,
+          reviewAfterMinutes: input.reviewAfterMinutes ?? 30,
+          fixtureId: this.fixtureId,
+        }, { type: "Settlement", id: input.settlementId });
+      }
+      case "RECEIVE_SETTLEMENT_RESULT":
+        return this.receiveSignedResult(command.input, `/settlements/${pathId(command.input.resourceId)}/results`, "Settlement");
+      case "VOID_SETTLEMENT": {
+        const input = command.input;
+        return this.postReceipt(`/settlements/${pathId(input.settlementId)}/void`, this.responsibilityBody(input), { type: "Settlement", id: input.settlementId });
+      }
+      case "CREATE_SETTLEMENT_REPLACEMENT": {
+        const input = command.input;
+        return this.postReceipt(`/settlements/${pathId(input.settlementId)}/replace`, {
+          ...this.responsibilityBody(input),
+          replacementSettlementId: input.replacementSettlementId,
+        }, { type: "Settlement", id: input.replacementSettlementId });
+      }
+      case "RESOLVE_MANUAL_REVIEW": {
+        const input = command.input;
+        return this.postReceipt(`/manual-reviews/${pathId(input.reviewId)}/resolve`, {
+          ...this.responsibilityBody(input),
+          outcome: wowManualReviewOutcome(input.outcome),
+        }, { type: "ManualReviewItem", id: input.reviewId });
+      }
+      case "RETRY_NOTIFICATION": {
+        const input = command.input;
+        return this.postReceipt(`/notifications/${pathId(input.notificationId)}/retries`, {
+          merchantId: input.merchantId,
+          idempotencyKey: input.idempotencyKey,
+          fixtureId: input.fixtureId ?? this.fixtureId,
+        }, { type: "MerchantNotification", id: input.notificationId });
+      }
+    }
+  }
+
+  getOperation(operationId: string): Promise<Operation> {
+    return this.client.get(`/operations/${pathId(operationId)}`).then((value) => mapOperation("wow", value));
+  }
+
+  getPayment(paymentId: string): Promise<Payment> {
+    return this.client.get<JsonRecord>(`/payments/${pathId(paymentId)}`).then((value) => mapPayment("wow", value));
+  }
+
+  listPayments(request: PageRequest): Promise<PageResult<Payment>> {
+    return this.client.get(`/payments${this.listQuery(request, "paymentId")}`).then((value) => mapPage(value, (item) => mapPayment("wow", item)));
+  }
+
+  getRefund(refundId: string): Promise<Refund> {
+    return this.client.get<JsonRecord>(`/refunds/${pathId(refundId)}`).then((value) => mapRefund("wow", value));
+  }
+
+  listRefunds(request: PageRequest): Promise<PageResult<Refund>> {
+    const filters = { ...request.filters, status: request.filters?.status === "REQUESTED" ? "CREATED" : request.filters?.status };
+    return this.client.get(`/refunds${this.listQuery({ ...request, filters }, "refundId")}`).then((value) => mapPage(value, (item) => mapRefund("wow", item)));
+  }
+
+  async getBill(billId: string): Promise<AuthoritativeBill> {
+    const [bill, revisions] = await Promise.all([
+      this.client.get<JsonRecord>(`/reference/statements/${pathId(billId)}`),
+      this.client.get<unknown[]>(`/reference/statements/${pathId(billId)}/revisions`),
+    ]);
+    return mapBill("wow", { ...bill, revisions });
+  }
+
+  getReconciliationRun(runId: string): Promise<ReconciliationRun> {
+    return this.client.get<JsonRecord>(`/reconciliation-runs/${pathId(runId)}`).then((value) => mapReconciliationRun("wow", value));
+  }
+
+  listReconciliationRuns(request: PageRequest): Promise<PageResult<ReconciliationRun>> {
+    return this.client.get(`/reconciliation-runs${this.listQuery(request, "runId")}`).then((value) => mapPage(value, (item) => mapReconciliationRun("wow", item)));
+  }
+
+  getSettlement(settlementId: string): Promise<Settlement> {
+    return this.client.get<JsonRecord>(`/settlements/${pathId(settlementId)}`).then((value) => mapSettlement("wow", value));
+  }
+
+  listSettlements(request: PageRequest): Promise<PageResult<Settlement>> {
+    const reverse: Record<string, string> = { READY_FOR_CONFIRMATION: "DRAFT", EXECUTING: "PROCESSING", SETTLED: "SUCCEEDED", EXECUTION_FAILED: "FAILED", CONFIRMED: "REVIEW_REQUIRED" };
+    const filters = { ...request.filters, status: request.filters?.status ? reverse[request.filters.status] ?? request.filters.status : undefined };
+    return this.client.get(`/settlements${this.listQuery({ ...request, filters }, "settlementId")}`).then((value) => mapPage(value, (item) => mapSettlement("wow", item)));
+  }
+
+  getManualReview(reviewId: string): Promise<ManualReviewItem> {
+    return this.client.get<JsonRecord>(`/manual-reviews/${pathId(reviewId)}`).then((value) => mapManualReview("wow", value));
+  }
+
+  listManualReviews(request: PageRequest): Promise<PageResult<ManualReviewItem>> {
+    return this.client.get(`/manual-reviews${this.listQuery(request, "reviewId")}`).then((value) => mapPage(value, (item) => mapManualReview("wow", item)));
+  }
+
+  getNotification(notificationId: string): Promise<MerchantNotification> {
+    return this.client.get<JsonRecord>(`/notifications/${pathId(notificationId)}`).then((value) => mapNotification("wow", value));
+  }
+
+  async listNotifications(request: PageRequest): Promise<PageResult<MerchantNotification>> {
+    const response = await this.client.get(`/notifications${queryString({ ...(request.filters ?? {}) } as Record<string, unknown>)}`);
+    const items = records(response).map((item) => mapNotification("wow", item));
+    return { items, pageSize: items.length, nextCursor: null };
+  }
+
+  getPaymentTimeline(paymentId: string): Promise<PaymentTimeline> {
+    return this.client.get(`/payments/${pathId(paymentId)}/trace`).then((value) => mapTimeline("wow", paymentId, value));
+  }
+
+  private listQuery(request: PageRequest, idField: string): string {
+    const filters = { ...(request.filters ?? {}) } as Record<string, unknown>;
+    if (filters.resourceId) {
+      filters[idField] = filters.resourceId;
+      delete filters.resourceId;
+    }
+    return queryString({ ...filters, cursor: request.cursor, pageSize: request.pageSize, fixtureId: this.fixtureId });
+  }
+
+  private billScriptPath(billId: string, revision: number): string {
+    return `/reference/bill-provider-scripts/${pathId(billId)}/revisions/${revision}`;
+  }
+
+  private notificationSelector(input: { notificationId?: string; sourceKind?: string; sourceFactId?: string }): JsonRecord {
+    return compact({
+      notificationId: input.notificationId,
+      sourceKind: input.sourceKind,
+      sourceFactIdentity: input.sourceFactId,
+    });
+  }
+
+  private async postReceipt(path: string, body: unknown, fallback: { type: string; id?: string }): Promise<OperationReceipt> {
+    const response = await this.client.post(path, body);
+    return mapReceipt("wow", response, fallback);
+  }
+
+  private async receiveSignedResult(input: Extract<BusinessCommand, { type: "RECEIVE_PAYMENT_RESULT" | "RECEIVE_REFUND_RESULT" | "RECEIVE_SETTLEMENT_RESULT" }>["input"], path: string, type: string): Promise<OperationReceipt> {
+    const outcome = input.outcome === "SUCCESS" ? "SUCCEEDED" : input.outcome === "FAILURE" ? "FAILED" : "UNKNOWN";
+    const unsigned = compact({
+      resultType: input.resourceType,
+      channelId: input.channelId,
+      resultIdentity: input.resultIdentity,
+      attemptRef: input.attemptId,
+      outcome,
+      amount: toWireMoney(input.money),
+      occurredAt: input.occurredAt,
+      externalTransactionId: input.externalTransactionId,
+      failureDisposition: input.failureDisposition,
+    });
+    const fixtureId = input.fixtureId ?? this.fixtureId;
+    const tokenResponse = await this.client.post<JsonRecord>(`/reference/fixtures/${pathId(fixtureId)}/tokens`, unsigned);
+    const response = await this.client.post(path, { ...unsigned, fixtureId, verificationToken: text(tokenResponse.verificationToken) });
+    return mapReceipt("wow", response, { type, id: input.resourceId });
+  }
+
+  private responsibilityBody(
+    input: { merchantId: string; idempotencyKey: string; actorId?: string; actorAlias?: string; actorRole?: string; reason: string; evidenceRefs: string[] },
+    defaultRole = "FINANCE_OPERATOR",
+    includeActorRole = false,
+  ) {
+    const actorId = input.actorId?.trim() || input.actorAlias?.trim();
+    if (!actorId) {
+      throw new BusinessError({
+        code: "RESPONSIBILITY_ACTOR_REQUIRED",
+        message: "人工责任动作必须提供可信 actorId 或可映射的 actorAlias。",
+        fields: [{ field: "actorAlias", message: "请选择可信责任人。", code: "REQUIRED" }],
+        retryable: false,
+      });
+    }
+    const reason = input.reason.trim();
+    if (!reason) {
+      throw new BusinessError({
+        code: "RESPONSIBILITY_REASON_REQUIRED",
+        message: "人工责任动作必须提供 reason。",
+        fields: [{ field: "reason", message: "请输入处置原因。", code: "REQUIRED" }],
+        retryable: false,
+      });
+    }
+    const evidenceRefs = input.evidenceRefs.map((item) => item.trim()).filter(Boolean);
+    if (evidenceRefs.length === 0) {
+      throw new BusinessError({
+        code: "RESPONSIBILITY_EVIDENCE_REQUIRED",
+        message: "人工责任动作必须提供至少一条 evidence。",
+        fields: [{ field: "evidenceRefs", message: "请输入证据引用。", code: "REQUIRED" }],
+        retryable: false,
+      });
+    }
+    return {
+      merchantId: input.merchantId,
+      actorId,
+      ...(includeActorRole ? { actorRole: input.actorRole?.trim() || defaultRole } : {}),
+      reason,
+      evidenceRefs,
+      idempotencyKey: input.idempotencyKey,
+    };
+  }
+
+  private healthResult(status: HealthStatus["status"], checkedAt: string, message: string): HealthStatus {
+    return { status, checkedAt, message, source: { adapter: "wow", sourceStatus: status } };
   }
 }
 
-export function mapWowPayment(value: JsonRecord): Payment {
-  const currency = requiredText(value, "currency");
-  const attempts = records(value.attempts).map((attempt): PaymentAttempt => ({
-    id: requiredId(attempt, "attemptId"),
-    channel: requiredText(attempt, "channel"),
-    status: mapAttemptStatus(attempt.status),
-    channelTransactionId: stringValue(attempt.channelTransactionId) ?? null,
-    receiptCount: numberValue(attempt.notificationReceiveCount) ?? arrayValue(attempt.receiptIds).length,
-    receipts: arrayValue(attempt.receiptIds).map((receipt) => ({
-      id: stringValue(receipt) ?? "unknown-receipt",
-      source: source("wow", attempt, requiredId(attempt, "attemptId")),
-    })),
-    source: source("wow", attempt, requiredId(attempt, "attemptId")),
-  }));
-  const status = mapPaymentStatus(value.status);
-  const paymentId = requiredId(value, "paymentId");
-  return {
-    id: paymentId,
-    merchantId: requiredText(value, "merchantId"),
-    merchantOrderNo: requiredText(value, "merchantOrderNo"),
-    idempotencyKey: stringValue(value.idempotencyKey) ?? null,
-    amount: wowMoney(value.amount, currency),
-    paymentMethod: requiredText(value, "paymentMethod"),
-    status,
-    createdAt: stringValue(value.createdAt) ?? null,
-    expiresAt: stringValue(value.expiresAt) ?? null,
-    succeededAt: stringValue(value.succeededAt) ?? null,
-    attempts,
-    refundSummary: {
-      successful: optionalWowMoney(value.successfulRefundAmount, currency),
-      reserved: optionalWowMoney(value.reservedRefundAmount, currency),
-    },
-    reviewIds: arrayValue(value.reviewIds).map((id) => stringValue(id)).filter((id): id is string => id !== undefined),
-    actions: wowPaymentActions(status, attempts.length > 0),
-    source: source("wow", value, paymentId),
-  };
-}
-
-export function mapWowRefund(value: JsonRecord): Refund {
-  const currency = requiredText(value, "currency");
-  const attemptIds = arrayValue(value.attemptIds).map((id) => stringValue(id)).filter((id): id is string => id !== undefined);
-  const channels = arrayValue(value.channels).map((channel) => stringValue(channel) ?? "unknown-channel");
-  const status = mapRefundStatus(value.status);
-  const refundId = requiredId(value, "refundId");
-  const receiptIds = arrayValue(value.receiptIds).map((id) => stringValue(id)).filter((id): id is string => id !== undefined);
-  const attempts: RefundAttempt[] = attemptIds.map((id, index) => ({
-    id,
-    channel: channels[index] ?? channels[0] ?? "unknown-channel",
-    status: mapAttemptStatus(value.status),
-    channelRefundId: stringValue(value.channelTransactionId) ?? null,
-    receiptCount: receiptIds.length,
-    receipts: receiptIds.map((receiptId) => ({ id: receiptId, source: source("wow", value, refundId) })),
-    source: source("wow", value, refundId),
-  }));
-  return {
-    id: refundId,
-    paymentId: requiredText(value, "paymentId"),
-    merchantId: requiredText(value, "merchantId"),
-    merchantRefundNo: requiredText(value, "merchantRefundNo"),
-    amount: wowMoney(value.amount, currency),
-    paymentMethod: stringValue(value.paymentMethod) ?? null,
-    status,
-    finalizedAt: stringValue(value.finalizedAt) ?? null,
-    channelRefundId: stringValue(value.channelTransactionId) ?? null,
-    reservationActive: typeof value.reservationActive === "boolean" ? value.reservationActive : null,
-    attempts,
-    reviewIds: arrayValue(value.reviewIds).map((id) => stringValue(id)).filter((id): id is string => id !== undefined),
-    actions: wowRefundActions(status, arrayValue(value.reviewIds).length > 0),
-    source: source("wow", value, refundId),
-  };
-}
-
-export function mapWowReconciliation(value: JsonRecord): Reconciliation {
-  const currency = requiredText(value, "currency");
-  const batchId = requiredId(value, "batchId");
-  const items = records(value.items).map((item): ReconciliationItem => ({
-    id: requiredId(item, "differenceIdentity"),
-    differenceType: requiredText(item, "differenceType"),
-    transactionKind: stringValue(item.transactionKind) ?? null,
-    paymentId: stringValue(item.paymentId) ?? null,
-    refundId: stringValue(item.refundId) ?? null,
-    amount: item.amount === undefined || item.amount === null ? undefined : wowMoney(item.amount, stringValue(item.currency) ?? currency),
-    resolved: typeof item.resolved === "boolean" ? item.resolved : null,
-    settlementBlocked: typeof item.settlementBlocked === "boolean" ? item.settlementBlocked : null,
-    evidence: stringValue(item.sourceFactIdentity) ?? null,
-    source: source("wow", item, requiredId(item, "differenceIdentity")),
-  }));
-  return {
-    id: batchId,
-    statementId: stringValue(value.statementId) ?? null,
-    channelId: requiredText(value, "channelId"),
-    currency,
-    reconciliationDate: stringValue(value.reconciliationDate) ?? null,
-    businessTimezone: stringValue(value.businessTimezone) ?? null,
-    status: requiredText(value, "status"),
-    revision: numberValue(value.effectiveRevision) ?? null,
-    settlementBlocked: typeof value.settlementBlocked === "boolean" ? value.settlementBlocked : null,
-    items,
-    actions: [
-      action("REGISTER_AUTHORITATIVE_STATEMENT", "登记 reference 权威账单", { confirmation: "danger", refresh: "read_once" }),
-      action("MARK_BILL_AVAILABLE", "通知账单可用", { confirmation: "confirm", refresh: "poll" }),
-      unavailable("RERUN_RECONCILIATION", "重跑对账", "WOW 没有公开的对账重跑端点。"),
-      unavailable("DISPOSE_RECONCILIATION_DIFFERENCE", "处置差异", "WOW 没有公开的差异处置端点。"),
-    ],
-    source: source("wow", value, batchId),
-  };
-}
-
-export function mapWowSettlement(value: JsonRecord): Settlement {
-  const currency = requiredText(value, "currency");
-  const settlementId = requiredId(value, "settlementId");
-  const lines = records(value.lines).map((line): SettlementLine => ({
-    id: requiredId(line, "lineId"),
-    sourceKind: stringValue(line.sourceKind) ?? null,
-    paymentId: stringValue(line.paymentId) ?? null,
-    refundId: stringValue(line.refundId) ?? null,
-    reconciliationId: stringValue(line.reconciliationBatchId) ?? null,
-    grossAmount: line.grossAmount === undefined || line.grossAmount === null ? undefined : wowMoney(line.grossAmount, stringValue(line.currency) ?? currency),
-    feeAmount: line.feeAmount === undefined || line.feeAmount === null ? undefined : wowMoney(line.feeAmount, stringValue(line.currency) ?? currency),
-    signedNetAmount: line.signedNetAmount === undefined || line.signedNetAmount === null ? undefined : wowMoney(line.signedNetAmount, stringValue(line.currency) ?? currency),
-    source: source("wow", line, requiredId(line, "lineId")),
-  }));
-  return {
-    id: settlementId,
-    merchantId: requiredText(value, "merchantId"),
-    channelId: requiredText(value, "channelId"),
-    currency,
-    status: requiredText(value, "status"),
-    netAmount: wowMoney(value.netAmount, currency),
-    predecessorSettlementId: stringValue(value.predecessorSettlementId) ?? null,
-    replacementSettlementId: stringValue(value.replacementSettlementId) ?? null,
-    blockerSummary: arrayValue(value.reviewReasons).map((reason) => stringValue(reason)).filter((reason): reason is string => reason !== undefined).join("；") || null,
-    lines,
-    actions: [
-      action("REPLACE_SETTLEMENT", "创建替代结算单", { confirmation: "danger", refresh: "poll" }),
-      action("ADJUDICATE_SETTLEMENT", "裁决结算复核", { confirmation: "danger", refresh: "poll" }),
-      unavailable("PREPARE_SETTLEMENT", "准备结算", "WOW 的 reference 流程从生成结算并自动推进开始。"),
-      unavailable("CONFIRM_SETTLEMENT", "确认结算", "WOW 没有公开的独立确认端点。"),
-    ],
-    source: source("wow", value, settlementId),
-  };
-}
-
-function wowPaymentActions(status: Payment["status"], hasAttempt: boolean): ActionDescriptor[] {
-  const actions: ActionDescriptor[] = [
-    unavailable("START_PAYMENT_ATTEMPT", "发起支付尝试", "WOW 在创建支付时自动启动尝试，当前没有独立入口。"),
-    action("GET_PAYMENT_TRACE", "查看全链路轨迹", { confirmation: "none", refresh: "read_once" }),
-  ];
-  if (status === "PENDING" || status === "PROCESSING" || status === "PENDING_CONFIRMATION") {
-    actions.push(hasAttempt
-      ? action("SUBMIT_PAYMENT_RESULT", "提交 reference 渠道结果", {
-          confirmation: "danger",
-          refresh: "poll",
-          requiredFields: ["attemptId", "result", "channel", "notificationId", "channelTransactionId"],
-          defaultValues: { channel: "fake" },
-        })
-      : unavailable("SUBMIT_PAYMENT_RESULT", "提交 reference 渠道结果", "支付尝试投影尚未可见；请刷新后重试。"));
+function wowPaymentScript(outcome: Extract<ReferenceCommand, { type: "CONFIGURE_CHANNEL" }>["input"]["outcome"]): string {
+  switch (outcome) {
+    case "SUCCESS": return "ACCEPT_THEN_SUCCESS";
+    case "FAILURE": return "ACCEPT_THEN_FAILURE";
+    case "UNKNOWN": return "ACCEPT_THEN_UNKNOWN";
+    default: return outcome;
   }
-  if (status === "PENDING") actions.push(action("EXPIRE_PAYMENT", "关闭已过期支付", { confirmation: "danger", refresh: "poll" }));
-  if (status === "SUCCEEDED") actions.push(action("CREATE_REFUND", "创建退款", {
-    confirmation: "danger",
-    refresh: "poll",
-    requiredFields: ["merchantRefundNo", "amount", "initialResult"],
-    defaultValues: { initialResult: "SUCCEEDED" },
-  }));
-  return actions;
 }
 
-function wowRefundActions(status: Refund["status"], hasReview: boolean): ActionDescriptor[] {
-  const actions: ActionDescriptor[] = [
-    unavailable("SUBMIT_REFUND_RESULT", "提交退款渠道结果", "WOW 退款结果在 reference 创建请求中确定。"),
-  ];
-  if (status === "PENDING_CONFIRMATION" || hasReview) {
-    actions.push(action("ADJUDICATE_REFUND", "裁决退款复核", { confirmation: "danger", refresh: "poll" }));
+function businessDateBefore(periodEnd: string, timeZone: string): string {
+  const end = new Date(periodEnd);
+  if (Number.isNaN(end.valueOf())) return periodEnd.slice(0, 10);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(end.valueOf() - 1));
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function wowReconciliationConclusion(value: "ACCEPT_DIFFERENCE" | "ESCALATE" | "CONFIRM_PLATFORM_FACT"): string {
+  return value;
+}
+
+function wowSettlementImpact(value: "ALLOW" | "BLOCK" | "CONFIRM"): string {
+  if (value === "ALLOW") return "NONE";
+  if (value === "BLOCK") return "BLOCKS_SETTLEMENT";
+  return "CONFIRMS_SETTLEMENT_FACT";
+}
+
+function wowManualReviewOutcome(value: string): string {
+  switch (value.trim().toUpperCase()) {
+    case "CONFIRM_SUCCESS": return "ACCEPT_SUCCESS";
+    case "KEEP_ACCEPTED_SUCCESS":
+    case "KEEP_CURRENT_TERMINAL": return "DISMISS";
+    default: return value.trim().toUpperCase();
   }
-  return actions;
-}
-
-function operationReceipt(
-  resourceType: OperationReceipt["resourceType"],
-  value: JsonRecord,
-  resourceId: string,
-  refresh: OperationReceipt["refresh"],
-): OperationReceipt {
-  const status = stringValue(value.status) ?? stringValue(value.paymentStatus) ?? stringValue(value.refundStatus);
-  return {
-    resourceType,
-    resourceId,
-    accepted: !["REJECTED", "FAILED"].includes(status ?? ""),
-    reused: value.reused === true || value.idempotentReplay === true,
-    sourceStatus: status ?? null,
-    refresh,
-    diagnostic: stringValue(value.diagnosticSummary) ?? stringValue(value.rejectionSummary) ?? null,
-    source: source("wow", value, resourceId),
-  };
-}
-
-function health(status: HealthStatus["status"], checkedAt: string, message: string, sourceStatus?: string): HealthStatus {
-  return { status, checkedAt, message, source: { adapter: "wow", sourceStatus: sourceStatus ?? null } };
-}
-
-function optionalWowMoney(value: unknown, currency: string) {
-  return value === undefined || value === null ? undefined : wowMoney(value, currency);
-}
-
-function pathId(value: string): string {
-  return encodeURIComponent(value);
-}
-
-function requiredText(value: JsonRecord, field: string): string {
-  const text = stringValue(value[field]);
-  if (text !== undefined && text.length > 0) return text;
-  throw invalidResponse(`WOW 响应缺少 ${field}。`, value);
-}
-
-function requiredId(value: JsonRecord, field: string): string {
-  return requiredText(value, field);
-}
-
-function requiredOperationId(value: JsonRecord): string {
-  for (const field of ["aggregateId", "paymentId", "refundId", "batchId", "settlementId"]) {
-    const id = stringValue(value[field]);
-    if (id) return id;
-  }
-  throw invalidResponse("WOW 操作回执缺少资源标识。", value);
-}
-
-function requiredResourceId(input: ExecuteActionInput): string {
-  if (input.resourceId) return input.resourceId;
-  throw new BusinessError({ code: "VALIDATION_ERROR", message: "该操作需要资源 ID。", fields: [{ field: "resourceId", message: "不能为空" }], retryable: false });
-}
-
-function recordAt(value: JsonRecord, field: string): JsonRecord {
-  const candidate = value[field];
-  if (isRecord(candidate)) return candidate;
-  throw invalidResponse(`WOW 响应缺少对象字段 ${field}。`, value);
-}
-
-function invalidResponse(message: string, diagnostic: unknown): BusinessError {
-  return new BusinessError({ code: "ADAPTER_RESPONSE_INVALID", message, fields: [], retryable: false, diagnostic });
 }

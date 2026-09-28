@@ -19,9 +19,8 @@ const defaultWait = (ms: number): Promise<void> => new Promise((resolve) => setT
 
 /** Polls a read model after an accepted command without treating acceptance as a terminal result. */
 export async function pollReceipt<T>(receipt: OperationReceipt, options: PollOptions<T>): Promise<PollResult<T>> {
-  if (!receipt.accepted || receipt.refresh === "none") return { receipt, settled: false, attempts: 0 };
-  const attempts = options.attempts ?? (receipt.refresh === "read_once" ? 1 : 8);
-  const intervalMs = options.intervalMs ?? 450;
+  const attempts = options.attempts ?? (receipt.readAfter.mode === "READ_ONCE" ? 1 : 8);
+  const intervalMs = options.intervalMs ?? receipt.readAfter.retryAfterMs ?? 450;
   const wait = options.wait ?? defaultWait;
   let last: T | undefined;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {

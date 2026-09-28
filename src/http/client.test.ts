@@ -20,17 +20,21 @@ describe("HTTP error normalization", () => {
     expect(receiver).toBe(globalThis);
   });
 
-  it("preserves source code, fields and diagnostic payload", () => {
+  it("preserves stable code, details, correlationId, fields and diagnostic payload", () => {
     const error = normalizeHttpError(409, {
       code: "IDEMPOTENCY_CONFLICT",
       message: "同一幂等键对应不同金额",
       details: { amount: "must match original request" },
+      correlationId: "corr-1",
+      retryable: false,
     });
 
     expect(error).toMatchObject({
-      code: "CONFLICT",
+      code: "IDEMPOTENCY_CONFLICT",
       sourceCode: "IDEMPOTENCY_CONFLICT",
       message: "同一幂等键对应不同金额",
+      details: { amount: "must match original request" },
+      correlationId: "corr-1",
       retryable: false,
       fields: [{ field: "amount", message: "must match original request" }],
     });
@@ -38,6 +42,24 @@ describe("HTTP error normalization", () => {
   });
 
   it("marks server failures as retryable", () => {
-    expect(normalizeHttpError(503, { code: "TEMPORARY", message: "try later" })).toMatchObject({ code: "SERVER_ERROR", retryable: true });
+    expect(normalizeHttpError(503, { code: "TEMPORARY", message: "try later" })).toMatchObject({ code: "TEMPORARY", retryable: true });
+  });
+
+  it.each([
+    [400, "VALIDATION_ERROR"],
+    [404, "NOT_FOUND"],
+    [409, "BUSINESS_CONFLICT"],
+    [503, "SERVER_ERROR"],
+  ])("uses the stable semantic fallback for an HTTP %s response without a backend code", (status, code) => {
+    expect(normalizeHttpError(status, { message: "plain transport error" })).toMatchObject({
+      code,
+      sourceCode: undefined,
+      message: "plain transport error",
+    });
+  });
+
+  it("does not replace an explicit backend retryability decision", () => {
+    expect(normalizeHttpError(503, { code: "PERMANENT_FAILURE", message: "do not retry", retryable: false }))
+      .toMatchObject({ code: "PERMANENT_FAILURE", retryable: false });
   });
 });

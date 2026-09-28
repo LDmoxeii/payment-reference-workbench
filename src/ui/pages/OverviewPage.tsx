@@ -1,72 +1,43 @@
 import { useEffect, useState } from "react";
-import { Activity, ArrowRight, BookOpenCheck, CreditCard, Landmark, RefreshCcw, Server, Trash2 } from "lucide-react";
-import type { HealthStatus, RecentRecord } from "../../domain/models";
+import { Activity, ArrowRight, Beaker, BookOpenCheck, CreditCard, FileSearch, Landmark, RefreshCcw, Server, ShieldCheck } from "lucide-react";
+import type { HealthStatus, ReferenceEnvironment } from "../../domain/models";
 import type { PaymentWorkbenchService } from "../../services/workbench-service";
-import { EmptyBlock, ErrorBlock, LoadingBlock, RecentLink, SectionHeader, StatusBadge } from "../components";
+import { DefinitionList, ErrorBlock, LoadingBlock, SectionHeader, StatusBadge } from "../components";
+import { formatTime } from "../format";
 
-interface Props {
-  service: PaymentWorkbenchService;
-  recent: RecentRecord[];
-  onNavigate: (page: "payments" | "refunds" | "operations" | "alignment", resource?: RecentRecord) => void;
-  onRemoveRecent: (record: RecentRecord) => void;
-  onClearRecent: () => void;
-}
+export type WorkbenchPage = "overview" | "payments" | "refunds" | "reconciliation" | "settlements" | "reviews" | "reference" | "alignment";
 
-export function OverviewPage({ service, recent, onNavigate, onRemoveRecent, onClearRecent }: Props) {
+export function OverviewPage({ service, onNavigate }: { service: PaymentWorkbenchService; onNavigate: (page: WorkbenchPage) => void }) {
   const [health, setHealth] = useState<HealthStatus>();
+  const [environment, setEnvironment] = useState<ReferenceEnvironment>();
   const [error, setError] = useState<unknown>();
 
-  const checkHealth = () => {
-    setError(undefined);
-    setHealth(undefined);
-    void service.health().then(setHealth).catch(setError);
-  };
+  function refresh() {
+    setError(undefined); setHealth(undefined);
+    void Promise.all([service.health(), service.getReferenceEnvironment()]).then(([nextHealth, nextEnvironment]) => { setHealth(nextHealth); setEnvironment(nextEnvironment); }).catch(setError);
+  }
+  useEffect(refresh, [service]);
 
-  useEffect(checkHealth, [service]);
-  const fullCapabilities = service.profile.capabilities.filter((item) => item.level === "full").length;
-  const gaps = service.profile.capabilities.filter((item) => item.level === "unavailable").length;
+  const entries: Array<{ page: WorkbenchPage; title: string; detail: string; icon: typeof CreditCard }> = [
+    { page: "payments", title: "支付", detail: "意图、attempt、渠道结果与 timeline", icon: CreditCard },
+    { page: "refunds", title: "退款", detail: "预算预占、attempt 与结果收敛", icon: RefreshCcw },
+    { page: "reconciliation", title: "对账", detail: "账单 revision、差异与事实确认", icon: FileSearch },
+    { page: "settlements", title: "结算", detail: "准备、冻结、执行、作废与替代", icon: Landmark },
+    { page: "reviews", title: "人工核对", detail: "责任处置、证据与通知投递", icon: ShieldCheck },
+    { page: "reference", title: "Reference Lab", detail: "fixture、policy、时钟与异常场景", icon: Beaker },
+    { page: "alignment", title: "实现对照", detail: "统一语义与两种框架实现方式", icon: BookOpenCheck },
+  ];
 
-  return (
-    <div className="page-stack">
-      <section className="overview-band">
-        <div>
-          <p className="eyebrow">统一业务工作台</p>
-          <h1>支付到结算的业务事实</h1>
-          <p>当前连接 <strong>{service.profile.label}</strong>。业务页面保持一致，源实现差异由能力和动作声明呈现。</p>
-        </div>
-        <div className="connection-summary">
-          <Server size={22} />
-          <div><span>连接状态</span>{health ? <StatusBadge status={health.status === "connected" ? "SUCCEEDED" : "FAILED"} /> : <span>检查中</span>}</div>
-          <code>{service.profile.apiBaseUrl}</code>
-        </div>
-      </section>
-
-      {error ? <ErrorBlock error={error} onRetry={checkHealth} /> : !health ? <LoadingBlock label="正在检查后端连接" /> : health.status !== "connected" ? <ErrorBlock error={new Error(health.message ?? "后端不可达")} onRetry={checkHealth} /> : null}
-
-      <section>
-        <SectionHeader title="业务入口" />
-        <div className="workflow-grid">
-          <button type="button" className="workflow-card" onClick={() => onNavigate("payments")}><CreditCard /><span><strong>支付受理</strong><small>创建、尝试与渠道结果</small></span><ArrowRight size={18} /></button>
-          <button type="button" className="workflow-card" onClick={() => onNavigate("refunds")}><RefreshCcw /><span><strong>退款处理</strong><small>申请、结果与预算占用</small></span><ArrowRight size={18} /></button>
-          <button type="button" className="workflow-card" onClick={() => onNavigate("operations")}><Landmark /><span><strong>平台运营</strong><small>对账、结算与人工动作</small></span><ArrowRight size={18} /></button>
-          <button type="button" className="workflow-card" onClick={() => onNavigate("alignment")}><BookOpenCheck /><span><strong>能力对照</strong><small>目标、现状与后端迭代</small></span><ArrowRight size={18} /></button>
-        </div>
-      </section>
-
-      <section className="metric-band">
-        <div><Activity size={20} /><span>完整能力</span><strong>{fullCapabilities}</strong></div>
-        <div><RefreshCcw size={20} /><span>部分能力</span><strong>{service.profile.capabilities.filter((item) => item.level === "partial").length}</strong></div>
-        <div><BookOpenCheck size={20} /><span>待对齐</span><strong>{gaps}</strong></div>
-      </section>
-
-      <section>
-        <SectionHeader title="本地最近记录" description="仅保存本浏览器访问过的标识，不代表后端全量数据。" action={recent.length > 0 ? <button className="button button--small" type="button" onClick={onClearRecent}><Trash2 size={15} />清空当前后端记录</button> : undefined} />
-        <div className="recent-list">
-          {recent.length === 0 ? <EmptyBlock title="暂无最近记录" detail="创建或按 ID 查询后会出现在这里。" /> : recent.slice(0, 8).map((record) => (
-            <RecentLink key={`${record.resourceType}:${record.id}`} label={record.label} id={record.id} status={record.status} onOpen={() => onNavigate(record.resourceType === "payment" ? "payments" : record.resourceType === "refund" ? "refunds" : "operations", record)} onRemove={() => onRemoveRecent(record)} />
-          ))}
-        </div>
-      </section>
-    </div>
-  );
+  return <div className="page-stack">
+    <section className="overview-band"><div><p className="eyebrow">统一业务工作台</p><h1>从支付意图到结算事实</h1><p>页面只使用统一业务契约。当前实现的传输与框架差异由适配层封装，不改变业务流程。</p></div><div className="connection-summary"><Server size={22} /><div><span>连接状态</span>{health ? <StatusBadge status={health.status === "connected" ? "SUCCEEDED" : health.status === "degraded" ? "REVIEW_REQUIRED" : "FAILED"} /> : <span>检查中</span>}</div><code>{service.profile.label} · {service.profile.apiBaseUrl}</code></div></section>
+    {error ? <ErrorBlock error={error} onRetry={refresh} /> : !health ? <LoadingBlock label="正在检查业务服务与 reference 环境" /> : null}
+    {health ? <section className="detail-band"><DefinitionList items={[
+      { label: "服务", value: service.profile.label }, { label: "健康检查", value: health.message }, { label: "检查时间", value: formatTime(health.checkedAt) },
+      { label: "Fixture", value: <code>{environment?.fixtureId ?? "—"}</code> }, { label: "逻辑时钟", value: formatTime(environment?.currentTime) },
+      { label: "默认商户", value: <code>{environment?.merchantId ?? "—"}</code> }, { label: "默认渠道", value: <code>{environment?.channelId ?? "—"}</code> },
+      { label: "Actor alias", value: <code>{environment?.actorAlias ?? "—"}</code> },
+    ]} /></section> : null}
+    <section><SectionHeader title="业务地图" description="按商户操作、渠道/fixture 实验与平台运营组织；列表均来自后端权威查询。" /><div className="workflow-grid">{entries.map((entry) => { const Icon = entry.icon; return <button type="button" className="workflow-card" key={entry.page} onClick={() => onNavigate(entry.page)}><Icon /><span><strong>{entry.title}</strong><small>{entry.detail}</small></span><ArrowRight size={18} /></button>; })}</div></section>
+    <section className="metric-band"><div><Activity size={20} /><span>统一业务能力</span><strong>{service.profile.capabilities.length}</strong></div><div><Server size={20} /><span>适配器隔离</span><strong>100%</strong></div><div><BookOpenCheck size={20} /><span>学习环境</span><strong>REFERENCE</strong></div></section>
+  </div>;
 }

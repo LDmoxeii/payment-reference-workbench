@@ -1,5 +1,5 @@
 import { BusinessError } from "../domain/errors";
-import type { BusinessErrorShape, FieldError } from "../domain/models";
+import type { ApiErrorShape, FieldError } from "../domain/models";
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 export type JsonRecord = Record<string, unknown>;
@@ -43,14 +43,14 @@ export class HttpClient {
     return payload as T;
   }
 
-  get<T>(path: string): Promise<T> {
-    return this.request<T>(path, { method: "GET" });
+  get<T>(path: string, headers?: Record<string, string>): Promise<T> {
+    return this.request<T>(path, { method: "GET", headers });
   }
 
-  post<T>(path: string, body?: unknown): Promise<T> {
+  post<T>(path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
     return this.request<T>(path, {
       method: "POST",
-      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      headers: body === undefined ? headers : { "Content-Type": "application/json", ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   }
@@ -69,16 +69,18 @@ async function readResponse(response: Response): Promise<unknown> {
 
 export function normalizeHttpError(status: number, payload: unknown): BusinessError {
   const source = isRecord(payload) ? payload : {};
-  const sourceCode = stringValue(source.code) ?? `HTTP_${status}`;
+  const sourceCode = stringValue(source.code);
   const sourceMessage = stringValue(source.message) ?? "后端未返回可读的错误信息。";
   const fields = normalizeFields(source.field, source.details);
-  const code = status === 404 ? "NOT_FOUND" : status === 409 ? "CONFLICT" : status === 400 ? "VALIDATION_ERROR" : status >= 500 ? "SERVER_ERROR" : "REQUEST_FAILED";
-  const shape: BusinessErrorShape = {
-    code,
+  const fallbackCode = status === 404 ? "NOT_FOUND" : status === 409 ? "BUSINESS_CONFLICT" : status === 400 ? "VALIDATION_ERROR" : status >= 500 ? "SERVER_ERROR" : "REQUEST_FAILED";
+  const shape: ApiErrorShape = {
+    code: sourceCode ?? fallbackCode,
     message: sourceMessage,
     fields,
     httpStatus: status,
-    retryable: status >= 500 || status === 408 || status === 429,
+    retryable: booleanValue(source.retryable) ?? (status >= 500 || status === 408 || status === 429),
+    details: source.details,
+    correlationId: stringValue(source.correlationId),
     sourceCode,
     sourceMessage,
     diagnostic: payload,

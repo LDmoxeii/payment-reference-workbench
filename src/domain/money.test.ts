@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { createMoney, decimalToMinor, minorToDecimal, minorToSafeInteger, subtractMoney } from "./money";
+import { createMoney, decimalToMinor, minorToDecimal, minorToSafeInteger, normalizeMinorAmount, subtractMoney } from "./money";
 
 describe("exact money helpers", () => {
   it("converts decimals without floating point", () => {
     expect(decimalToMinor("001.20", "CNY")).toBe("120");
     expect(decimalToMinor("-0.01", "CNY")).toBe("-1");
     expect(minorToDecimal("900719925474099312345", "CNY")).toBe("9007199254740993123.45");
+  });
+
+  it("uses canonical amountMinor as a normalized decimal integer string", () => {
+    const money = createMoney("cny", "0001234");
+
+    expect(money).toEqual({ currency: "CNY", amountMinor: "1234" });
+    expect(money).not.toHaveProperty("minorAmount");
+    expect(normalizeMinorAmount("-000")).toBe("0");
   });
 
   it("rejects invalid precision and unsafe WOW values", () => {

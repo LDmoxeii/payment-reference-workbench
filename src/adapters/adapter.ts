@@ -1,37 +1,54 @@
 import type {
+  AuthoritativeBill,
   BackendProfile,
-  CreatePaymentInput,
-  CreateRefundInput,
-  ExecuteActionInput,
+  BusinessCommand,
   HealthStatus,
+  ManualReviewItem,
+  MerchantNotification,
+  Operation,
   OperationReceipt,
   PageRequest,
   PageResult,
   Payment,
-  PaymentTrace,
-  Reconciliation,
+  PaymentTimeline,
+  ReconciliationRun,
+  ReferenceCommand,
+  ReferenceCommandResult,
+  ReferenceEnvironment,
   Refund,
   Settlement,
-  SubmitPaymentResultInput,
-  SubmitRefundResultInput,
 } from "../domain/models";
 
+/**
+ * The only backend boundary visible to services and UI. Implementations own every
+ * transport-specific path, method, header, envelope and convergence decision.
+ */
 export interface PaymentBackendAdapter {
   readonly profile: BackendProfile;
+
   health(): Promise<HealthStatus>;
-  createPayment(input: CreatePaymentInput): Promise<OperationReceipt>;
+  getReferenceEnvironment(fixtureId?: string): Promise<ReferenceEnvironment>;
+  executeReference(command: ReferenceCommand): Promise<ReferenceCommandResult>;
+
+  execute(command: BusinessCommand): Promise<OperationReceipt>;
+  getOperation(operationId: string): Promise<Operation>;
+
   getPayment(paymentId: string): Promise<Payment>;
   listPayments(request: PageRequest): Promise<PageResult<Payment>>;
-  startPaymentAttempt(paymentId: string): Promise<OperationReceipt>;
-  submitPaymentResult(input: SubmitPaymentResultInput): Promise<OperationReceipt>;
-  expirePayment(paymentId: string): Promise<OperationReceipt>;
-  createRefund(input: CreateRefundInput): Promise<OperationReceipt>;
   getRefund(refundId: string): Promise<Refund>;
   listRefunds(request: PageRequest): Promise<PageResult<Refund>>;
-  submitRefundResult(input: SubmitRefundResultInput): Promise<OperationReceipt>;
-  adjudicateRefund(refundId: string, payload: Record<string, unknown>): Promise<OperationReceipt>;
-  getPaymentTrace(paymentId: string): Promise<PaymentTrace>;
-  getReconciliation(batchId: string): Promise<Reconciliation>;
+
+  getBill(billId: string): Promise<AuthoritativeBill>;
+  getReconciliationRun(runId: string): Promise<ReconciliationRun>;
+  listReconciliationRuns(request: PageRequest): Promise<PageResult<ReconciliationRun>>;
+
   getSettlement(settlementId: string): Promise<Settlement>;
-  executeAction(input: ExecuteActionInput): Promise<OperationReceipt>;
+  listSettlements(request: PageRequest): Promise<PageResult<Settlement>>;
+
+  getManualReview(reviewId: string): Promise<ManualReviewItem>;
+  listManualReviews(request: PageRequest): Promise<PageResult<ManualReviewItem>>;
+
+  getNotification(notificationId: string): Promise<MerchantNotification>;
+  listNotifications(request: PageRequest): Promise<PageResult<MerchantNotification>>;
+  getPaymentTimeline(paymentId: string, request?: PageRequest): Promise<PaymentTimeline>;
 }
