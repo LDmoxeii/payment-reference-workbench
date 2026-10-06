@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { BusinessCommand, ReferenceCommand } from "../domain/models";
 import type { FetchLike, JsonRecord } from "../http/client";
 import { WowPaymentAdapter } from "./wow-adapter";
+import { observeReceipt } from "../services/workbench-service";
 
 function setup() {
   const calls: { url: string; method: string; body?: JsonRecord }[] = [];
@@ -21,6 +22,38 @@ function setup() {
 }
 
 describe("WOW reference script transport contract", () => {
+  it.each(["bill-bc0c625b", "merchant:bill/2024:1"])("reads the bill after a revision signal without treating its composite identity as the bill ID: %s", async (billId) => {
+    const statementPath = `/backend/api/reference/statements/${encodeURIComponent(billId)}`;
+    const revisionIdentity = `${billId}:1`;
+    const rawReceipt = {
+      operationId: "op-bill", commandType: "BillAvailable", acceptanceStatus: "ACCEPTED",
+      resourceType: "AuthoritativeBillRevision", resourceId: revisionIdentity,
+      readAfter: { mode: "READ_ONCE", operationUrl: "/api/operations/op-bill", resourceUrl: `/api/reference/statements/${encodeURIComponent(billId)}/revisions/1` },
+    };
+    const fetchImpl: FetchLike = vi.fn(async (input, init = {}) => {
+      const path = String(input);
+      let body: unknown;
+      if (init.method === "POST" && path === "/backend/api/reconciliation/bill-available") body = rawReceipt;
+      else if (path === "/backend/api/operations/op-bill") body = { ...rawReceipt, status: "SUCCEEDED" };
+      else if (path === statementPath) body = { billId, currentRevision: 1, currency: "CNY", channelId: "fake" };
+      else if (path === `${statementPath}/revisions`) body = [{ revision: 1, records: [] }];
+      else return new Response(JSON.stringify({ code: "AUTHORITATIVE_BILL_NOT_FOUND", message: "未找到指定权威账单" }), { status: 404 });
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    const adapter = new WowPaymentAdapter({ apiBaseUrl: "/backend/api", fetchImpl });
+    const receipt = await adapter.execute({ type: "SIGNAL_BILL_AVAILABLE", input: {
+      billId, revision: 1, merchantId: "merchant", channelId: "fake", currency: "CNY",
+      businessDate: "2024-01-01", businessTimezone: "Asia/Shanghai", signalIdentity: "signal", idempotencyKey: "bill-signal",
+    } });
+    const result = await observeReceipt(adapter, receipt);
+    expect(result.timedOut).toBe(false);
+    expect(result.resource).toMatchObject({ billId, currentRevision: 1, revisions: [{ revision: 1 }] });
+    expect(receipt.readAfter).toMatchObject(rawReceipt.readAfter);
+    expect(receipt.source.sourceId).toBe(revisionIdentity);
+    expect(result.operation.resource?.resourceId).toBe(revisionIdentity);
+    expect(vi.mocked(fetchImpl).mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
   it("advertises the four real script control planes", () => {
     const { adapter } = setup();
     for (const id of ["reference-lab", "channel-script", "bill-read-script", "notification-sender-script", "settlement-executor-script"]) {

@@ -133,16 +133,25 @@ export function ReconciliationPage({ service }: { service: PaymentWorkbenchServi
     const sequence = ++runRequestSequence.current;
     setError(undefined); setNotice(`${label}已提交，正在观察 Operation。`);
     try {
-      const observed = await execution.run<ReconciliationRun>(command, id ? () => service.getReconciliationRun(id) : undefined);
+      const observed = await execution.run<ReconciliationRun | AuthoritativeBill>(command, id ? () => service.getReconciliationRun(id) : undefined);
       setRefreshKey((value) => value + 1);
       if (sequence !== runRequestSequence.current) return;
       if (observed.resource) {
-        const merchantId = await merchantForRun(observed.resource);
+        await applyObservedResource(observed.resource, sequence);
         if (sequence !== runRequestSequence.current) return;
-        applyRun(observed.resource, merchantId);
       } else if (id && !observed.timedOut) { await loadRun(id); return; }
-      setNotice(observed.timedOut ? `${label}已受理但观察暂未收敛。` : `${label}已受理，Operation 为 ${observed.operation.status}。`);
+      const billHint = observed.operation.status === "SUCCEEDED" && observed.resource && !("runId" in observed.resource) ? "账单已回读，请核对右侧表单后显式创建 ReconciliationRun。" : "";
+      setNotice(observed.timedOut ? `${label}已受理但观察暂未收敛。` : `${label}已受理，Operation 为 ${observed.operation.status}。${billHint}`);
     } catch (cause) { if (sequence === runRequestSequence.current) setError(cause); }
+  }
+  async function applyObservedResource(value: ReconciliationRun | AuthoritativeBill, sequence: number) {
+    if (!("runId" in value)) {
+      billRequestSequence.current += 1;
+      setBill(value); setBillId(value.billId); setLoading(false);
+      return;
+    }
+    const merchantId = await merchantForRun(value);
+    if (sequence === runRequestSequence.current) applyRun(value, merchantId);
   }
   async function queryBill(event: FormEvent) {
     event.preventDefault(); const sequence = ++billRequestSequence.current;
@@ -155,16 +164,16 @@ export function ReconciliationPage({ service }: { service: PaymentWorkbenchServi
     const sequence = ++runRequestSequence.current;
     setError(undefined); setNotice("正在使用同一 Operation ID 继续观察。");
     try {
-      const observed = await execution.resume<ReconciliationRun>();
+      const observed = await execution.resume<ReconciliationRun | AuthoritativeBill>();
       if (sequence !== runRequestSequence.current) return;
       if (observed.resource) {
-        const merchantId = await merchantForRun(observed.resource);
+        await applyObservedResource(observed.resource, sequence);
         if (sequence !== runRequestSequence.current) return;
-        applyRun(observed.resource, merchantId);
       }
       else if (run && !observed.timedOut) { await loadRun(run.runId); return; }
       if (!observed.timedOut) setRefreshKey((value) => value + 1);
-      setNotice(observed.timedOut ? "Operation 仍未在本次窗口内收敛，可稍后再次继续观察。" : `Operation 已收敛为 ${observed.operation.status}。`);
+      const billHint = observed.operation.status === "SUCCEEDED" && observed.resource && !("runId" in observed.resource) ? "账单已回读，请核对右侧表单后显式创建 ReconciliationRun。" : "";
+      setNotice(observed.timedOut ? "Operation 仍未在本次窗口内收敛，可稍后再次继续观察。" : `Operation 已收敛为 ${observed.operation.status}。${billHint}`);
     } catch (cause) { if (sequence === runRequestSequence.current) setError(cause); }
   }
   function signalBill(event: FormEvent) {

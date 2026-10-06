@@ -3,7 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as confirmation from "../confirmation";
-import type { ReconciliationRun, ReferenceEnvironment } from "../../domain/models";
+import type { AuthoritativeBill, OperationReceipt, ReconciliationRun, ReferenceEnvironment } from "../../domain/models";
+import { BusinessError } from "../../domain/errors";
 import type { PaymentWorkbenchService } from "../../services/workbench-service";
 import { setBillReconciliationHint, consumeBillReconciliationHint } from "../bill-navigation";
 import { ReconciliationPage } from "./ReconciliationPage";
@@ -22,6 +23,41 @@ function field(label: string, scope: Element): HTMLInputElement { return [...sco
 async function change(input: HTMLInputElement, value: string) { await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); }); }
 
 describe("对账明细与真实差异处置", () => {
+  it.each([false, true])("账单通知回读账单而非 Run，保留当前 Run 并提示显式创建（继续观察：%s）", async (resume) => {
+    const bill: AuthoritativeBill = { billId: "bill-bc0c625b", currentRevision: 1, channelId: "fake", currency: "CNY", merchantId: "merchant", revisions: [], source: { adapter: "wow" } };
+    const receipt: OperationReceipt = { operationId: "op-bill", commandType: "BillAvailable", resource: { resourceType: "AuthoritativeBill", resourceId: bill.billId }, acceptanceStatus: "ACCEPTED", idempotentReplay: false, readAfter: { mode: "READ_ONCE", operationUrl: "/operations/op-bill" }, source: { adapter: "wow" } };
+    const getBill = vi.fn().mockResolvedValue(bill);
+    if (resume) getBill.mockRejectedValueOnce(new BusinessError({ code: "RESOURCE_NOT_READY", message: "账单稍后可读", fields: [], retryable: true }));
+    const api = service({ getBill, execute: vi.fn().mockResolvedValue(receipt), getOperation: vi.fn().mockResolvedValue({ operationId: "op-bill", status: "SUCCEEDED" }) });
+    await render(api); await click("详情");
+    const form = [...page.querySelectorAll("form")].find((item) => item.textContent?.includes("通知账单可用"))!;
+    await change(field("Bill ID", form), bill.billId);
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+    if (resume) {
+      const button = [...page.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent?.includes("继续观察"))!;
+      expect(button).toBeDefined();
+      await act(async () => { button.click(); });
+    }
+    expect(getBill).toHaveBeenCalledWith(bill.billId);
+    expect(page.textContent).toContain(`${bill.billId} · current revision 1`);
+    expect(page.textContent).toContain("请核对右侧表单后显式创建 ReconciliationRun");
+    expect(page.querySelector(".detail-heading")?.textContent).toContain("run-a");
+    expect(api.getReconciliationRun).toHaveBeenCalledTimes(1);
+    expect(api.execute).toHaveBeenCalledTimes(1);
+    expect(page.querySelector(".error-block")).toBeNull();
+  });
+
+  it("账单通知返回 Run 时仍展示该运行，不提示重复创建", async () => {
+    const value = run("signal-run");
+    const api = service({ execute: vi.fn().mockResolvedValue({ operationId: "op-run", resource: { resourceType: "ReconciliationRun", resourceId: value.runId }, readAfter: { mode: "READ_ONCE" }, source: { adapter: "cap4k" } }), getOperation: vi.fn().mockResolvedValue({ operationId: "op-run", status: "SUCCEEDED" }), getReconciliationRun: vi.fn().mockResolvedValue(value) });
+    await render(api);
+    const form = [...page.querySelectorAll("form")].find((item) => item.textContent?.includes("通知账单可用"))!;
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+    expect(page.querySelector(".detail-heading")?.textContent).toContain("signal-run");
+    expect(page.textContent).not.toContain("请核对右侧表单后显式创建 ReconciliationRun");
+    expect(api.execute).toHaveBeenCalledTimes(1);
+  });
+
   it("4/1/3 汇总与 4/3/1 筛选；MATCHED只读且伪造submit不能发处置", async () => {
     const execute = vi.fn(); await render(service({ execute })); await click("详情");
     const section = detailSection(); expect(section.textContent).toContain("总明细4"); expect(section.textContent).toContain("匹配1"); expect(section.textContent).toContain("真实差异3"); expect(section.querySelectorAll("tbody tr")).toHaveLength(4);

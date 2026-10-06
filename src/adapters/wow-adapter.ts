@@ -336,7 +336,7 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
         return this.receiveSignedResult(command.input, `/refunds/${pathId(command.input.resourceId)}/results`, "Refund");
       case "SIGNAL_BILL_AVAILABLE": {
         const input = command.input;
-        return this.postReceipt("/reconciliation/bill-available", {
+        const receipt = await this.postReceipt("/reconciliation/bill-available", {
           statementId: input.billId,
           revision: wowBillRevision(input.revision),
           merchantId: input.merchantId,
@@ -345,6 +345,13 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
           readAttemptIdentity: input.idempotencyKey,
           fixtureId: this.fixtureId,
         }, { type: "AuthoritativeBill", id: input.billId });
+        // WOW identifies the revision as `${billId}:${revision}`. The unified
+        // reader loads the bill and its revision chain using the original ID;
+        // keep the revision URL and source ID as evidence, without parsing IDs.
+        if (receipt.resource?.resourceType === "AuthoritativeBillRevision") {
+          return { ...receipt, resource: { resourceType: "AuthoritativeBill", resourceId: input.billId } };
+        }
+        return receipt;
       }
       case "RUN_RECONCILIATION": {
         const input = command.input;
