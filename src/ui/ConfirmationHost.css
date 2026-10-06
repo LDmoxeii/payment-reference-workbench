@@ -1,0 +1,34 @@
+.confirmation-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgb(15 23 42 / 55%);
+  overscroll-behavior: contain;
+}
+.confirmation-dialog {
+  width: min(100%, 560px);
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+  padding: 28px;
+  border: 1px solid #dce3ec;
+  border-radius: 18px;
+  background: #fff;
+  color: #172033;
+  box-shadow: 0 24px 80px rgb(15 23 42 / 28%);
+  overflow-wrap: anywhere;
+}
+.confirmation-dialog__eyebrow { color: #64748b; font-size: 13px; }
+.confirmation-dialog h2 { margin: 10px 0 18px; font-size: 21px; line-height: 1.5; }
+.confirmation-dialog__detail { white-space: pre-wrap; font-size: 15px; line-height: 1.8; }
+.confirmation-dialog__hint { margin: 18px 0; color: #64748b; font-size: 13px; line-height: 1.7; }
+.confirmation-dialog__actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; }
+.confirmation-dialog__actions .button { min-height: 44px; }
+@media (max-width: 480px) {
+  .confirmation-backdrop { padding: 16px; }
+  .confirmation-dialog { padding: 20px; max-height: calc(100dvh - 32px); }
+  .confirmation-dialog__actions .button { flex: 1; }
+}

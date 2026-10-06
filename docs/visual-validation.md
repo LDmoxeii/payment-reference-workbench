@@ -1,5 +1,43 @@
 # 前端视觉验证记录
 
+## 2026-10-01 当前多记录账单验收
+
+`complete-multi-record-bill-reconciliation` 的候选 `a0983c88-602b-489b-aa9f-86c06d7e3455` 已由新独立 Verifier 自然完成 A1–A23 验收，全部通过。Runtime 已接收结果，当前为等待用户接受，尚未归档；正式逐项结论以 [验收报告](./comet/changes/complete-multi-record-bill-reconciliation/verification.md) 为准。本节记录本次实际视觉与联调证据，不把下方 9 月基线算作当前证据。
+
+### 环境与实际范围
+
+- WOW：同一候选前端 `http://127.0.0.1:5173` 连接专用真实服务 `http://127.0.0.1:18080/api`，fixture `multi-ui-wow`。
+- CAP4K：同一候选前端 `http://127.0.0.1:5174` 连接专用真实服务 `http://127.0.0.1:18081/api`，fixture `multi-ui-cap4k`。
+- 多记录场景使用独立业务日 `2056-02-10`、`Asia/Shanghai`，时刻 `2056-02-10T06:00:00Z`；其他支付/退款复核及 paired smoke 的时钟变化有记录，收尾恢复上述时刻。未清空用户交易、改动后端源码或关闭用户 8080 服务。
+- 两端真实 UI 发布仅一笔支付的 revision 1，旧 Run 显示总明细 4 / 匹配 1 / 真实差异 3 与权威结算阻断；查询、复制、补齐三笔支付及一笔退款为完整 revision 2，新 Run 为 4 / 4 / 0，再冻结结算并执行唯一成功。旧 revision 完整对象与旧 Run 原始明细保持不变。
+- 实际收入 CNY 300.00、成功退款 CNY 20.00、费用 CNY 1.80、调整 CNY 0.00；净额 CNY 278.20 与 INCLUDED 构成的有符号合计一致。此金额只是本次 fixture 的结果，不是 UI 写死的期望值。
+- 桌面复核对账汇总、筛选、长 ID、责任字段与结算执行记录；`390 × 844` 移动视口复核多行账单、逐行精度错误、支付/退款 Attempt、页面内确认与当前视口错误通知，控件可操作。窄表格允许容器内部滚动，不要求一次显示全部列。
+- 验收自行点击页面内确认/取消：取消不发布，确认后才发出命令。未要求用户点击原生弹窗，也未删除确认保护。
+
+### 证据保留
+
+原始证据仍在系统 TEMP，并已逐文件按 SHA-256 校验复制到独立本机目录：
+
+`D:/code/payment-reference-workbench-evidence/complete-multi-record-bill-reconciliation/a0983c88/`
+
+该目录不属于候选仓库，避免保留证据改动已冻结实现；它不会随 Git 自动分发，迁移机器时需另行复制。原始 JSON 绑定候选与 `skill-coordinated:verifier:8fb8d61f-a4e2-4853-add2-b10389e6ce9b`。
+
+| 证据 | 内容 | SHA-256 |
+|---|---|---|
+| `verifier-v7-multirecord-http.json` | 58 次公开 HTTP 交换、历史不可变/冻结/合计/收尾断言 | `8b04dd7062501d898e09e6fae26f7dc257b38a9b0dc641b990935ad493235639` |
+| `verifier-v7-ui-observations.json` | 两端实际页面观察、操作结果与截图索引 | `b7b1acd324dbb28093aafe8b1eb0a2622d6037f0f7818797dd747359f9a4a234` |
+| `verifier-v7-paired-live-check.json` | 本次真实 HTTP 成功及 UNKNOWN/人工处置分支 2/2 | `5fe93816a99c76c0f662ffabfab830b183d8af5e64d9882e76858c44c8d19fb5` |
+
+可直接查看的代表性截图：
+
+- [CAP4K 新 Run 4 / 4 / 0](/D:/code/payment-reference-workbench-evidence/complete-multi-record-bill-reconciliation/a0983c88/verifier-v7-cap4k-run2-desktop.jpg)。
+- [WOW 唯一结算执行成功](/D:/code/payment-reference-workbench-evidence/complete-multi-record-bill-reconciliation/a0983c88/verifier-v7-wow-settlement-success.jpg)。
+- [CAP4K 移动端当前视口错误通知](/D:/code/payment-reference-workbench-evidence/complete-multi-record-bill-reconciliation/a0983c88/verifier-v7-cap4k-mobile-review-error.jpg)。
+
+截图不能替代业务验收。当前 Runtime 类型检查、232 项测试、生产构建、diff-check 通过；4 个默认 live skipped 不算通过，另有本次 paired live 2/2 和双端真实 UI/HTTP 证据。实际未注入网络丢包或进程崩溃；所有无效 callback、负净额及 void/replacement 故障分支未逐个真实 UI 重跑，其冻结/幂等/边界结论来自当前候选测试与源码核验，不冒称截图已证明。
+
+CAP4K 部分 search/ManualReview 源时间投影早 8 小时、通知列表摘要与详情投递计数不同，以及再次创建支付前须核对 `DEFAULT/CARD`，均保留在正式风险列表。前端本次不篡改这些源值；详情与源诊断是核对依据。
+
 ## 2026-09-25 视觉基线
 
 `align-workbench-with-unified-backends` 在 2026-09-25 使用本机 Chrome headless 完成过桌面与移动视口渲染复核。移动证据通过 Chrome DevTools Protocol 的 `Emulation.setDeviceMetricsOverride` 强制为真实 `390 × 844` CSS viewport，并连接当时运行中的后端与 Vite 开发代理；不是把较宽 viewport 压缩成 390px 图片。该批截图是有时间边界的视觉基线，不自动代表后续每次业务字段调整后的当前画面。

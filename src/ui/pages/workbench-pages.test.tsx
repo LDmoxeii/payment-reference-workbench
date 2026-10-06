@@ -2,6 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import * as confirmation from "../confirmation";
 import { BusinessError } from "../../domain/errors";
 import type { ActionDescriptor, BackendProfile, MerchantNotification, Operation, OperationReceipt, Payment, Refund, ReferenceEnvironment, Settlement, TimelineEntry } from "../../domain/models";
 import type { PaymentWorkbenchService } from "../../services/workbench-service";
@@ -673,7 +674,7 @@ describe("Payment 与 Refund 详情上下文和 Attempt 级联", () => {
   });
 
   it("支付 Attempt 没有外部交易号时可以补录，空值在页面被拒绝且不会发送命令", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(confirmation, "requestConfirmation").mockResolvedValue(true);
     const detail: Payment = {
       ...payment, paymentId: "pay-no-channel-reference", status: "PROCESSING", finality: "NON_FINAL",
       attempts: [{ attemptId: "attempt-no-reference", channelId: "C-001", status: "ACCEPTED", submissions: [{ submissionId: "submission-1" }], receipts: [] }],
@@ -705,7 +706,7 @@ describe("Payment 与 Refund 详情上下文和 Attempt 级联", () => {
   });
 
   it("退款 Attempt 没有渠道退款号时可以补录，空值在页面被拒绝且不会发送命令", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(confirmation, "requestConfirmation").mockResolvedValue(true);
     const detail: Refund = {
       ...refund, refundId: "refund-no-channel-reference", status: "PROCESSING", finality: "NON_FINAL",
       attempts: [{ attemptId: "refund-attempt-no-reference", channelId: "C-001", status: "ACCEPTED", submissions: [{ submissionId: "submission-2" }], receipts: [] }],
@@ -889,7 +890,7 @@ describe("结算失败后的受控新 execution", () => {
   });
 
   it("统一 action 开放新 execution，成功受理后生成新的 identity", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(confirmation, "requestConfirmation").mockResolvedValue(true);
     const settlement: Settlement = {
       resourceType: "settlement",
       settlementId: "settlement-failed",
@@ -926,7 +927,7 @@ describe("结算失败后的受控新 execution", () => {
 
 describe("Reference Lab 能力结果", () => {
   it("alternative 结果显示替代实验路径，不显示为已配置成功", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(confirmation, "requestConfirmation").mockResolvedValue(true);
     const executeReference = vi.fn().mockResolvedValue({ effect: "alternative", summary: "使用显式 attempt submit 与可信 result 构造等价场景" });
     const referenceService = service({
       profile: profile([{ id: "channel-script", label: "channel-script", description: "没有独立脚本传输", level: "alternative", alternative: "使用显式结果入口" }]),
@@ -945,7 +946,7 @@ describe("Reference Lab 能力结果", () => {
   });
 
   it("结算脚本同时携带 fixture、渠道和 execution identity，并能回读与重置", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(confirmation, "requestConfirmation").mockResolvedValue(true);
     const executeReference = vi.fn().mockResolvedValue({
       effect: "applied", summary: "脚本状态已读取",
       data: { script: "UNKNOWN", consumed: false, diagnosticSummary: "等待 execution" },

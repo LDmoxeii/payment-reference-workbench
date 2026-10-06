@@ -118,7 +118,7 @@ interface SuccessfulClosureSnapshot {
     revision: string;
     initialDifferenceTypes: string[];
     initiallyBlocked: boolean;
-    channelOnlyResolved: boolean;
+    channelOnlyResolved: boolean | null;
     dispositionCount: number;
     finallyBlocked: boolean;
     finality: string;

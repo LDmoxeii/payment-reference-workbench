@@ -1,0 +1,34 @@
+.bill-editor { min-width: 0; }
+.bill-editor__lookup { padding-bottom: 22px; margin-bottom: 22px; border-bottom: 1px solid var(--border, #dce4e1); }
+.bill-editor__lookup .lookup-bar { align-items: end; }
+.bill-editor__lookup .lookup-bar label { display: grid; gap: 6px; flex: 1; min-width: 0; }
+.bill-editor__history { margin-top: 16px; }
+.bill-editor__fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.bill-editor__toolbar { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin: 16px 0; }
+.bill-editor__toolbar h3 { margin: 0; }
+.bill-editor__toolbar label { display: grid; gap: 5px; min-width: 0; }
+.bill-editor__rows { display: grid; gap: 16px; }
+.bill-editor__row { border: 1px solid #d8e3df; border-radius: 8px; padding: 14px 16px 16px; margin: 0; min-width: 0; background: #fafcfb; }
+.bill-editor__row legend { padding: 0 7px; color: #244c43; font-weight: 650; }
+.bill-editor__row-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
+.bill-editor .form-grid { margin-top: 12px; }
+.bill-editor .form-grid label { min-width: 0; }
+.bill-editor input, .bill-editor select { max-width: 100%; min-width: 0; }
+.bill-editor input[aria-invalid="true"] { border-color: #a13d35; }
+.bill-field-error { color: #a13d35; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.bill-editor__help { font-size: 13px; color: #60726c; line-height: 1.7; }
+.bill-editor__check { display: flex; align-items: flex-start; gap: 8px; margin-top: 10px; }
+.bill-editor__check input { width: auto; min-height: auto; margin-top: 4px; }
+.bill-editor__publish { width: 100%; margin-top: 16px; }
+.bill-editor__publication { margin-top: 22px; padding-top: 18px; border-top: 1px solid #d8e3df; overflow-wrap: anywhere; }
+.bill-editor__publication h3 { display: block; line-height: 1.7; }
+.bill-editor .button { white-space: normal; }
+@media (max-width: 640px) {
+  .bill-editor__lookup .lookup-bar { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .bill-editor__toolbar, .bill-editor__toolbar .quick-actions { align-items: stretch; }
+  .bill-editor__toolbar > *, .bill-editor__toolbar .quick-actions { max-width: 100%; }
+  .bill-editor__row { padding: 10px; }
+  .bill-editor .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .bill-editor__row-actions { justify-content: flex-start; }
+  .bill-editor__publication .definition-list { grid-template-columns: minmax(0, 1fr); }
+}

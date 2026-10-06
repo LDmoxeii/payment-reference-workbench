@@ -25,6 +25,7 @@ import type {
   ReconciliationDifference,
   ReconciliationDifferenceType,
   ReconciliationRun,
+  RegisterBillInput,
   Refund,
   RefundAttempt,
   ResourceRef,
@@ -363,7 +364,7 @@ function mapRefundAttempt(value: JsonRecord): RefundAttempt {
   };
 }
 
-export function mapReconciliationRun(adapter: BackendId, value: JsonRecord): ReconciliationRun {
+export function mapReconciliationRun(adapter: BackendId, value: JsonRecord, detailResponse = false): ReconciliationRun {
   const runId = requiredOne(value, ["runId"], "对账响应缺少 runId。");
   const status = text(value.status) ?? "PENDING";
   const scopeRaw = object(value.scope);
@@ -392,6 +393,13 @@ export function mapReconciliationRun(adapter: BackendId, value: JsonRecord): Rec
     settlementBlocked: booleanValue(value.settlementBlocked) ?? null,
     createdAt: firstText(value, ["createdAt", "sortTime"]) ?? null,
     completedAt: text(value.completedAt) ?? null,
+    matchedCount: optionalCount(value.matchedCount),
+    differenceCount: optionalCount(value.differenceCount),
+    unresolvedDifferenceCount: optionalCount(value.unresolvedDifferenceCount),
+    blockingDifferenceCount: optionalCount(value.blockingDifferenceCount),
+    totalRecordCount: optionalCount(value.totalRecordCount),
+    detailsComplete: booleanValue(value.detailsComplete)
+      ?? (detailResponse && Array.isArray(value.differences ?? value.items) ? true : null),
     differences: records(value.differences ?? value.items).map(mapDifference),
     actions: reconciliationActions(status),
     source: source(adapter, value, runId),
@@ -411,6 +419,7 @@ function mapDifference(value: JsonRecord): ReconciliationDifference {
     // WOW exposes differenceId directly and therefore still takes precedence.
     differenceId: requiredOne(value, ["differenceId", "itemId", "differenceIdentity"], "差异响应缺少标识。"),
     differenceType: reconciliationDifferenceType(value.differenceType),
+    sourceDifferenceType: text(value.differenceType) ?? null,
     transactionKind: text(value.transactionKind) ?? null,
     paymentId: text(value.paymentId) ?? null,
     refundId: text(value.refundId) ?? null,
@@ -423,8 +432,8 @@ function mapDifference(value: JsonRecord): ReconciliationDifference {
     matchingBasis: firstText(value, ["matchingBasis", "sourceFactIdentity"]) ?? null,
     platformEvidenceRefs,
     billEvidenceRefs,
-    resolved: booleanValue(value.resolved) ?? false,
-    settlementBlocked: booleanValue(value.settlementBlocked) ?? false,
+    resolved: booleanValue(value.resolved) ?? null,
+    settlementBlocked: booleanValue(value.settlementBlocked) ?? null,
     dispositions: records(value.dispositions).map((item) => ({
       status: text(item.status) ?? null,
       conclusion: text(item.conclusion) ?? null,
@@ -607,40 +616,43 @@ function mapTimelineEntry(value: JsonRecord): TimelineEntry {
 
 export function mapBill(adapter: BackendId, value: JsonRecord): AuthoritativeBill {
   const billId = requiredOne(value, ["billId", "billIdentity", "statementId"], "账单响应缺少 billId。");
+  const currentRevision = revisionValue(value.currentRevision ?? value.revision);
+  const current = records(value.revisions).find((revision) => String(revision.revision) === String(currentRevision));
   return {
     billId,
     channelId: text(value.channelId) ?? "",
     merchantId: text(value.merchantId) ?? null,
     currency: text(value.currency) ?? "CNY",
     businessDate: firstText(value, ["businessDate", "reconciliationDate"]) ?? null,
-    currentRevision: numberValue(value.currentRevision) ?? numberValue(value.revision) ?? null,
+    currentRevision,
     currentRevisionId: text(value.currentRevisionId) ?? null,
-    businessTimezone: text(value.businessTimezone) ?? null,
+    businessTimezone: text(value.businessTimezone) ?? text(current?.businessTimezone) ?? null,
     createdAt: text(value.createdAt) ?? null,
     revisions: records(value.revisions).map((revision) => ({
       billId,
-      revision: numberValue(revision.revision) ?? 0,
+      revision: revisionValue(revision.revision) ?? "",
       revisionId: text(revision.revisionId) ?? null,
       channelId: text(revision.channelId) ?? text(value.channelId) ?? "",
       merchantId: text(revision.merchantId) ?? text(value.merchantId) ?? "",
       currency: text(revision.currency) ?? text(value.currency) ?? "CNY",
       businessDate: firstText(revision, ["businessDate", "reconciliationDate"]) ?? null,
+      businessTimezone: text(revision.businessTimezone) ?? null,
       complete: booleanValue(revision.complete) ?? (text(revision.completeness) === "COMPLETE" ? true : text(revision.completeness) === "PARTIAL" ? false : null),
       completeness: text(revision.completeness)
         ?? (booleanValue(revision.complete) === true ? "COMPLETE" : booleanValue(revision.complete) === false ? "PARTIAL" : null),
       payloadFingerprint: firstText(revision, ["payloadFingerprint", "contentFingerprint"]) ?? null,
       rawEvidence: text(revision.rawEvidence) ?? null,
-      records: records(revision.records).map(mapBillRecord),
+      records: records(revision.records).map((record) => mapBillRecord(adapter, record)),
       publishedAt: text(revision.publishedAt) ?? null,
     })),
     source: source(adapter, value, billId),
   };
 }
 
-function mapBillRecord(value: JsonRecord): BillRecord {
+function mapBillRecord(adapter: BackendId, value: JsonRecord): BillRecord {
   return {
     recordId: requiredOne(value, ["recordId", "recordIdentity"], "账单记录缺少 recordId。"),
-    recordIdentity: text(value.recordIdentity) ?? null,
+    recordIdentity: text(value.recordIdentity) ?? (adapter === "wow" ? text(value.recordId) : null) ?? null,
     transactionKind: text(value.transactionKind) ?? "PAYMENT",
     externalTransactionId: firstText(value, ["externalTransactionId", "channelTransactionIdentity", "externalTransactionIdentity"]) ?? "",
     money: money(value.money ?? value.amount),
@@ -664,6 +676,33 @@ export function queryString(values: Record<string, unknown>): string {
 
 export function compact<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null && item !== "")) as T;
+}
+
+/** Cache only derived time, never a previous request body or command result. */
+export function createBillPublicationClock(now: () => Date): (input: RegisterBillInput) => string {
+  const firstSentAt = new Map<string, string>();
+  return (input) => {
+    if (input.publishedAt !== undefined) return input.publishedAt;
+    // Property ordering must not turn a reconstructed, unchanged command into a new publication.
+    const content = JSON.stringify(input, (_key, value: unknown) => isRecord(value)
+      ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]]))
+      : value);
+    const existing = firstSentAt.get(content);
+    if (existing !== undefined) return existing;
+    const instant = now().toISOString();
+    firstSentAt.set(content, instant);
+    return instant;
+  };
+}
+
+function optionalCount(value: unknown): number | null {
+  const count = numberValue(value);
+  return count !== undefined && Number.isSafeInteger(count) && count >= 0 ? count : null;
+}
+
+function revisionValue(value: unknown): number | string | null {
+  if (typeof value === "string") return value;
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
 }
 
 export function records(value: unknown): JsonRecord[] {

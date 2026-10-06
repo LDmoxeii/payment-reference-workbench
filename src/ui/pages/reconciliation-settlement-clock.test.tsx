@@ -2,6 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import * as confirmation from "../confirmation";
 import type { ReconciliationRun, ReferenceEnvironment, Settlement } from "../../domain/models";
 import type { PaymentWorkbenchService } from "../../services/workbench-service";
 import { ReconciliationPage } from "./ReconciliationPage";
@@ -90,18 +91,21 @@ describe("Reference 业务时间与权威关联", () => {
     expect(getBill.mock.calls.map(([id]) => id)).toEqual(["bill-a", "bill-b", "bill-c"]);
   });
 
-  it("Reference Lab 账单默认时间取逻辑时钟，推进后同步业务日期与发生时间", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("Reference Lab 新草稿取逻辑时钟，刷新不覆盖草稿，显式同步才更新时间", async () => {
+    vi.spyOn(confirmation, "requestConfirmation").mockResolvedValue(true);
     const later = { ...environment, currentTime: "2048-01-02T23:00:00Z" };
     const getReferenceEnvironment = vi.fn().mockResolvedValueOnce(environment).mockResolvedValue(later);
     const executeReference = vi.fn().mockResolvedValue({ effect: "applied", summary: "ok" });
     const page = await render(<ReferenceLabPage service={service({ getReferenceEnvironment, executeReference })} />);
-    const billForm = Array.from(page.querySelectorAll("form")).find((form) => form.textContent?.includes("发布 immutable revision"))!;
+    const billForm = page.querySelector(".bill-editor form[novalidate]")!;
     expect(field(billForm, "业务日期").value).toBe("2047-06-10");
-    expect(field(billForm, "记录发生时间（ISO）").value).toBe("2047-06-10T06:00:00.000Z");
+    expect(field(billForm, "记录发生时间（ISO）").value).toBe(environment.currentTime);
     await click(Array.from(page.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "刷新环境")!);
+    expect(field(billForm, "业务日期").value).toBe("2047-06-10");
+    expect(field(billForm, "记录发生时间（ISO）").value).toBe(environment.currentTime);
+    await click(Array.from(page.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "同步业务日期与全部行时间")!);
     expect(field(billForm, "业务日期").value).toBe("2048-01-03");
-    expect(field(billForm, "记录发生时间（ISO）").value).toBe("2048-01-02T23:00:00.000Z");
+    expect(field(billForm, "记录发生时间（ISO）").value).toBe(later.currentTime);
   });
 
   it("对账页保持现有 scope，显式同步时使用新逻辑时钟计算业务日期", async () => {

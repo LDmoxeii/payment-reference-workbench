@@ -2,6 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import * as confirmation from "../confirmation";
 import type { ManualReviewItem, MerchantNotification, Operation, OperationReceipt, ReconciliationRun, ReferenceEnvironment, Settlement } from "../../domain/models";
 import type { PaymentWorkbenchService } from "../../services/workbench-service";
 import { ReconciliationPage } from "./ReconciliationPage";
@@ -145,7 +146,7 @@ describe("次级资源权威详情与刷新", () => {
   });
 
   it("结算命令使用当前权威资源回读，并刷新列表", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(confirmation, "requestConfirmation").mockResolvedValue(true);
     const initial = settlement("settlement-ready");
     const updated = { ...initial, status: "CONFIRMED", version: 2 };
     const getSettlement = vi.fn().mockResolvedValueOnce(initial).mockResolvedValue(updated);
@@ -193,7 +194,7 @@ describe("次级资源权威详情与刷新", () => {
   });
 
   it("处置与通知重试完成后更新对应权威详情和列表", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(confirmation, "requestConfirmation").mockResolvedValue(true);
     const oldReview = review("review-action", "待处置");
     const newReview = { ...oldReview, status: "RESOLVED", summary: "已处置" };
     const oldNotification = notification("notification-action");

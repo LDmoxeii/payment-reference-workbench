@@ -296,6 +296,8 @@ export interface FactConfirmation extends DifferenceDisposition {
 export interface ReconciliationDifference {
   differenceId: string;
   differenceType: ReconciliationDifferenceType;
+  /** Original classification, including values unknown to this client. */
+  sourceDifferenceType?: string | null;
   transactionKind?: string | null;
   paymentId?: string | null;
   refundId?: string | null;
@@ -308,8 +310,8 @@ export interface ReconciliationDifference {
   matchingBasis?: string | null;
   platformEvidenceRefs: EvidenceRef[];
   billEvidenceRefs: EvidenceRef[];
-  resolved: boolean;
-  settlementBlocked: boolean;
+  resolved: boolean | null;
+  settlementBlocked: boolean | null;
   dispositions: DifferenceDisposition[];
   confirmations: FactConfirmation[];
 }
@@ -335,13 +337,23 @@ export interface ReconciliationRun {
   settlementBlocked?: boolean | null;
   createdAt?: string | null;
   completedAt?: string | null;
+  /** Backend counts only; omitted values must not be interpreted as zero. */
+  matchedCount?: number | null;
+  differenceCount?: number | null;
+  unresolvedDifferenceCount?: number | null;
+  blockingDifferenceCount?: number | null;
+  totalRecordCount?: number | null;
+  /** True only when this response is known to contain the complete Run detail. */
+  detailsComplete?: boolean | null;
   differences: ReconciliationDifference[];
   actions: ActionDescriptor[];
   source: SourceMetadata;
 }
 
 export interface BillRecord {
+  /** Source resource identifier; CAP4K returns an internal UUID here. */
   recordId: string;
+  /** Stable business identity used when copying a record into a new revision. */
   recordIdentity?: string | null;
   transactionKind: string;
   externalTransactionId: string;
@@ -362,6 +374,7 @@ export interface BillRevision {
   merchantId: string;
   currency: string;
   businessDate?: string | null;
+  businessTimezone?: string | null;
   complete?: boolean | null;
   completeness?: string | null;
   payloadFingerprint?: string | null;
@@ -625,6 +638,8 @@ export interface RegisterBillInput {
   businessTimezone: string;
   idempotencyKey: string;
   fixtureId?: string;
+  /** First-send timestamp retained by the publisher for safe retries. */
+  publishedAt?: string;
   /** Reference provider script: reject this many reads before the revision becomes readable. */
   unavailableReadCount?: number;
   records: BillRecord[];

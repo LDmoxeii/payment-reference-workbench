@@ -24,6 +24,7 @@ import type { PaymentBackendAdapter } from "./adapter";
 import type { AdapterRuntimeOptions } from "./factory";
 import {
   compact,
+  createBillPublicationClock,
   mapBill,
   mapManualReview,
   mapNotification,
@@ -67,10 +68,12 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
   readonly profile: BackendProfile;
   private readonly client: HttpClient;
   private readonly fixtureId: string;
+  private readonly billPublishedAt: ReturnType<typeof createBillPublicationClock>;
 
   constructor(private readonly options: AdapterRuntimeOptions) {
     this.client = new HttpClient({ baseUrl: options.apiBaseUrl, fetchImpl: options.fetchImpl });
     this.fixtureId = options.fixtureId ?? "reference-default";
+    this.billPublishedAt = createBillPublicationClock(() => options.now?.() ?? new Date());
     this.profile = {
       id: "wow",
       label: "WOW Reference Payment",
@@ -234,9 +237,11 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
       }
       case "REGISTER_BILL": {
         const input = command.input;
+        const revision = wowBillRevision(input.revision);
+        const publishedAt = this.billPublishedAt(input);
         const response = await this.client.post<JsonRecord>("/reference/statements", {
           statementId: input.billId,
-          revision: input.revision,
+          revision,
           channelId: input.channelId,
           currency: input.currency,
           merchantId: input.merchantId,
@@ -244,12 +249,12 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
           reconciliationDate: input.businessDate,
           businessTimezone: input.businessTimezone,
           records: input.records.map((item) => ({
-            recordId: item.recordId,
+            recordId: item.recordIdentity ?? item.recordId,
             transactionKind: item.transactionKind,
             externalTransactionId: item.externalTransactionId,
             amount: toWireMoney(item.money),
-            status: item.status,
-            occurredAt: item.occurredAt,
+            status: item.rawStatus ?? item.status,
+            occurredAt: item.occurredAt ?? publishedAt,
           })),
           fixtureId: input.fixtureId ?? this.fixtureId,
         });
@@ -333,7 +338,7 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
         const input = command.input;
         return this.postReceipt("/reconciliation/bill-available", {
           statementId: input.billId,
-          revision: input.revision,
+          revision: wowBillRevision(input.revision),
           merchantId: input.merchantId,
           signalIdentity: input.signalIdentity,
           idempotencyKey: input.idempotencyKey,
@@ -346,7 +351,7 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
         return this.postReceipt("/reconciliation-runs", {
           merchantId: input.merchantId,
           statementId: input.billId,
-          revision: input.revision,
+          revision: wowBillRevision(input.revision),
           idempotencyKey: input.idempotencyKey,
           runId: input.runId,
         }, { type: "ReconciliationRun", id: input.runId });
@@ -356,7 +361,7 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
         return this.postReceipt("/reconciliation-runs/reruns", {
           merchantId: input.merchantId,
           statementId: input.billId,
-          revision: input.revision,
+          revision: wowBillRevision(input.revision),
           idempotencyKey: input.idempotencyKey,
           runId: input.runId,
         }, { type: "ReconciliationRun", id: input.runId });
@@ -366,7 +371,7 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
         const responsibility = this.responsibilityBody(input, "RECONCILIATION_REVIEWER", true);
         return this.postReceipt(`/reconciliation-runs/${pathId(input.runId)}/differences/dispositions`, {
           ...responsibility,
-          revision: input.revision,
+          revision: wowBillRevision(input.revision),
           differenceIdentity: input.differenceId,
           conclusion: wowReconciliationConclusion(input.conclusion),
           settlementImpact: wowSettlementImpact(input.settlementImpact),
@@ -377,7 +382,7 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
         const responsibility = this.responsibilityBody(input, "RECONCILIATION_REVIEWER", true);
         return this.postReceipt(`/reconciliation-runs/${pathId(input.runId)}/differences/confirmations`, {
           ...responsibility,
-          revision: input.revision,
+          revision: wowBillRevision(input.revision),
           differenceIdentity: input.differenceId,
           confirmation: input.confirmation ?? {},
         }, { type: "ReconciliationRun", id: input.runId });
@@ -478,7 +483,7 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
   }
 
   getReconciliationRun(runId: string): Promise<ReconciliationRun> {
-    return this.client.get<JsonRecord>(`/reconciliation-runs/${pathId(runId)}`).then((value) => mapReconciliationRun("wow", value));
+    return this.client.get<JsonRecord>(`/reconciliation-runs/${pathId(runId)}`).then((value) => mapReconciliationRun("wow", value, true));
   }
 
   listReconciliationRuns(request: PageRequest): Promise<PageResult<ReconciliationRun>> {
@@ -519,6 +524,7 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
 
   private listQuery(request: PageRequest, idField: string): string {
     const filters = { ...(request.filters ?? {}) } as Record<string, unknown>;
+    if (request.filters?.billRevision !== undefined) filters.billRevision = wowBillRevision(request.filters.billRevision, "billRevision");
     if (filters.resourceId) {
       filters[idField] = filters.resourceId;
       delete filters.resourceId;
@@ -533,7 +539,7 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
   }
 
   private billScriptPath(billId: string, revision: number): string {
-    return `/reference/bill-provider-scripts/${pathId(billId)}/revisions/${revision}`;
+    return `/reference/bill-provider-scripts/${pathId(billId)}/revisions/${wowBillRevision(revision)}`;
   }
 
   private notificationSelector(input: { notificationId?: string; sourceKind?: string; sourceFactId?: string }): JsonRecord {
@@ -613,6 +619,19 @@ export class WowPaymentAdapter implements PaymentBackendAdapter {
   private healthResult(status: HealthStatus["status"], checkedAt: string, message: string): HealthStatus {
     return { status, checkedAt, message, source: { adapter: "wow", sourceStatus: status } };
   }
+}
+
+function wowBillRevision(revision: number, field = "revision"): number {
+  const maximum = 2_147_483_647;
+  if (!Number.isSafeInteger(revision) || revision < 1 || revision > maximum) {
+    const message = `WOW 账单 revision 必须是 1 到 ${maximum} 之间的整数（Kotlin Int32 范围）。`;
+    throw new BusinessError({
+      code: "BILL_REVISION_OUT_OF_RANGE", message, retryable: false,
+      fields: [{ field, code: "OUT_OF_RANGE", message }],
+      details: { minimum: 1, maximum, receivedRevision: revision },
+    });
+  }
+  return revision;
 }
 
 function wowPaymentScript(outcome: Extract<ReferenceCommand, { type: "CONFIGURE_CHANNEL" }>["input"]["outcome"]): string {

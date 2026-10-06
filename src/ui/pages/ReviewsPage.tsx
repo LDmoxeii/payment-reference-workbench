@@ -3,6 +3,7 @@ import { Bell, RefreshCw, Search, ShieldCheck } from "lucide-react";
 import type { ManualReviewItem, MerchantNotification, ReferenceEnvironment } from "../../domain/models";
 import type { PaymentWorkbenchService } from "../../services/workbench-service";
 import { canExecute, confirmAction, findAction, token } from "../action-utils";
+import { useConfirmationScope } from "../confirmation";
 import { AuthoritativeList } from "../AuthoritativeList";
 import { CommandFeedback, DefinitionList, EmptyBlock, ErrorBlock, InlineNotice, LoadingBlock, SectionHeader, SourceDetails, StatusBadge } from "../components";
 import { evidenceLabel, formatTime } from "../format";
@@ -12,6 +13,8 @@ export function ReviewsPage({ service }: { service: PaymentWorkbenchService }) {
   const execution = useCommandExecution(service);
   const [review, setReview] = useState<ManualReviewItem>();
   const [notification, setNotification] = useState<MerchantNotification>();
+  const confirmationScope = useConfirmationScope(review, service);
+  const notificationConfirmationScope = useConfirmationScope(notification, service);
   const [reviewId, setReviewId] = useState("");
   const [notificationId, setNotificationId] = useState("");
   const [reviewLoading, setReviewLoading] = useState(false);
@@ -84,7 +87,7 @@ export function ReviewsPage({ service }: { service: PaymentWorkbenchService }) {
     }
   }
   async function submitResolution(event: FormEvent) {
-    event.preventDefault(); if (!review || !confirmAction(findAction(review.actions, "RESOLVE_MANUAL_REVIEW"), "处置人工核对")) return;
+    event.preventDefault(); if (!review || !await confirmAction(findAction(review.actions, "RESOLVE_MANUAL_REVIEW"), "处置人工核对", confirmationScope)) return;
     const target = review.reviewId;
     lastCommandTarget.current = { kind: "review", id: target };
     ++reviewRequestSequence.current;
@@ -102,7 +105,7 @@ export function ReviewsPage({ service }: { service: PaymentWorkbenchService }) {
     } catch (cause) { setError(cause); }
   }
   async function retryNotification() {
-    if (!notification || !confirmAction(undefined, "重试商户通知")) return;
+    if (!notification || !await confirmAction(undefined, "重试商户通知", notificationConfirmationScope)) return;
     const target = notification.notificationId;
     lastCommandTarget.current = { kind: "notification", id: target };
     ++notificationRequestSequence.current;

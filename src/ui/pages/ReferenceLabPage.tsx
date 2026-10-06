@@ -1,12 +1,13 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Beaker, Clock3, FilePlus2, RefreshCw, Settings2 } from "lucide-react";
-import { createMoney, decimalToMinor } from "../../domain/money";
+import { Beaker, Clock3, RefreshCw, Settings2 } from "lucide-react";
 import type { CapabilityDeclaration, ReferenceCommand, ReferenceCommandResult, ReferenceEnvironment } from "../../domain/models";
 import type { PaymentWorkbenchService } from "../../services/workbench-service";
-import { token } from "../action-utils";
+import { BillRevisionEditor } from "../BillRevisionEditor";
+import { parseBillRevision } from "../bill-draft";
 import { DefinitionList, ErrorBlock, InlineNotice, LoadingBlock, SectionHeader } from "../components";
 import { formatTime } from "../format";
-import { referenceBusinessDate, referenceInstant } from "../reference-time";
+import { referenceInstant } from "../reference-time";
+import { requestConfirmation, useConfirmationScope } from "../confirmation";
 
 type ScriptKind = "channel-script" | "bill-read-script" | "notification-sender-script" | "settlement-executor-script";
 
@@ -42,12 +43,6 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
   });
   const [clock, setClock] = useState({ instant: referenceInstant(), duration: "PT10M" });
   const [channel, setChannel] = useState({ channelId: "", outcome: "ACCEPT_THEN_SUCCESS" });
-  const [bill, setBill] = useState({
-    billId: token("bill"), revision: "1", merchantId: "reference-merchant", channelId: "",
-    currency: "CNY", businessDate: referenceBusinessDate(referenceInstant(), "Asia/Shanghai"), businessTimezone: "Asia/Shanghai",
-    idempotencyKey: token("bill-register"), recordId: token("bill-record"), transactionKind: "PAYMENT",
-    externalTransactionId: "", amount: "100.00", status: "SUCCESS", occurredAt: referenceInstant(),
-  });
   const [billScript, setBillScript] = useState({ billId: "", revision: "1", unavailableReadCount: "1" });
   const [notificationSender, setNotificationSender] = useState({
     notificationId: "", sourceKind: "", sourceFactId: "",
@@ -63,12 +58,12 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
   const notificationCapability = capability("notification-sender-script");
   const settlementCapability = capability("settlement-executor-script");
   const fixtureId = environmentForm.fixtureId;
+  const confirmationScope = useConfirmationScope(fixtureId, service);
+  const executionGuard = useRef(false);
 
   function syncBusinessClock(value: ReferenceEnvironment) {
     const instant = referenceInstant(value.currentTime);
-    const businessTimezone = value.policy?.businessTimezone ?? "Asia/Shanghai";
     setClock((old) => ({ ...old, instant }));
-    setBill((old) => ({ ...old, occurredAt: instant, businessTimezone, businessDate: referenceBusinessDate(instant, businessTimezone) }));
   }
 
   async function refresh() {
@@ -86,7 +81,6 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
         feeRate: value.policy?.feeRate ?? old.feeRate,
       }));
       setChannel((old) => ({ ...old, channelId: value.channelId }));
-      setBill((old) => ({ ...old, merchantId: value.merchantId, channelId: value.channelId }));
       setSettlementExecutor((old) => ({ ...old, channelId: value.channelId }));
     } catch (cause) {
       setError(cause);
@@ -97,7 +91,10 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
   useEffect(() => { void refresh(); }, [service]);
 
   async function execute(command: ReferenceCommand, confirmation?: string) {
-    if (confirmation && !window.confirm(`${confirmation}\n\n该入口只用于 reference 学习环境。`)) return;
+    if (executionGuard.current) return;
+    if (confirmation && !await requestConfirmation(`${confirmation}\n\n该入口只用于 reference 学习环境。`, confirmationScope)) return;
+    if (!confirmationScope.active || executionGuard.current) return;
+    executionGuard.current = true;
     setLoading(true);
     setError(undefined);
     try {
@@ -107,6 +104,7 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
     } catch (cause) {
       setError(cause);
     } finally {
+      executionGuard.current = false;
       setLoading(false);
     }
   }
@@ -123,27 +121,17 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
     }, "更新 fixture 与 policy");
   }
 
-  function registerBill(event: FormEvent) {
-    event.preventDefault();
-    void execute({
-      type: "REGISTER_BILL",
-      input: {
-        billId: bill.billId, revision: Number(bill.revision), merchantId: bill.merchantId,
-        channelId: bill.channelId, currency: bill.currency, businessDate: bill.businessDate,
-        businessTimezone: bill.businessTimezone, idempotencyKey: bill.idempotencyKey,
-        records: [{
-          recordId: bill.recordId, transactionKind: bill.transactionKind,
-          externalTransactionId: bill.externalTransactionId,
-          money: createMoney(bill.currency, decimalToMinor(bill.amount, bill.currency)),
-          status: bill.status, occurredAt: bill.occurredAt,
-        }],
-      },
-    }, "发布权威账单 revision");
-    setBillScript((old) => ({ ...old, billId: bill.billId, revision: bill.revision }));
+  function executeBillScript(type: "CONFIGURE_BILL_PROVIDER" | "READ_BILL_PROVIDER_SCRIPT" | "RESET_BILL_PROVIDER_SCRIPT", confirmation?: string) {
+    try {
+      const selector = { fixtureId, billId: billScript.billId, revision: parseBillRevision(billScript.revision) };
+      const command: ReferenceCommand = type === "CONFIGURE_BILL_PROVIDER"
+        ? { type, input: { ...selector, unavailableReadCount: Number(billScript.unavailableReadCount) } }
+        : { type, input: selector };
+      void execute(command, confirmation);
+    } catch (cause) { setError(cause); }
   }
 
   const channelSelector = { fixtureId, channelId: channel.channelId };
-  const billSelector = { fixtureId, billId: billScript.billId, revision: Number(billScript.revision) };
   const notificationSelector = {
     fixtureId, notificationId: notificationSender.notificationId || undefined,
     sourceKind: notificationSender.sourceKind || undefined,
@@ -227,7 +215,7 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
       <section className="panel"><h3><Beaker size={18} />账单 provider 脚本</h3><CapabilityNote capability={billCapability} />
         <form className="form-grid" onSubmit={(e) => {
           e.preventDefault();
-          void execute({ type: "CONFIGURE_BILL_PROVIDER", input: { ...billSelector, unavailableReadCount: Number(billScript.unavailableReadCount) } }, "配置账单暂不可读次数");
+          executeBillScript("CONFIGURE_BILL_PROVIDER", "配置账单暂不可读次数");
         }}>
           <label><span>Bill ID</span><input required value={billScript.billId} onChange={(e) => setBillScript({ ...billScript, billId: e.target.value })} /></label>
           <label><span>Revision</span><input required type="number" min="1" value={billScript.revision} onChange={(e) => setBillScript({ ...billScript, revision: e.target.value })} /></label>
@@ -235,31 +223,13 @@ export function ReferenceLabPage({ service }: { service: PaymentWorkbenchService
           <button className="button button--danger span-2" disabled={loading || billCapability?.level === "unavailable"} type="submit">配置 provider 读取脚本</button>
         </form>
         <ScriptButtons busy={loading} capability={billCapability}
-          onRead={() => void execute({ type: "READ_BILL_PROVIDER_SCRIPT", input: billSelector })}
-          onReset={() => void execute({ type: "RESET_BILL_PROVIDER_SCRIPT", input: billSelector }, "重置账单 provider 脚本")} />
+          onRead={() => executeBillScript("READ_BILL_PROVIDER_SCRIPT")}
+          onReset={() => executeBillScript("RESET_BILL_PROVIDER_SCRIPT", "重置账单 provider 脚本")} />
       </section>
     </div>
 
-    <section className="panel"><h3><FilePlus2 size={18} />发布单条记录账单 revision</h3>
-      <InlineNotice>业务日期和记录发生时间默认采用 Reference Lab 逻辑时钟；修改时钟后将同步，手动编辑后可随时重新同步。</InlineNotice>
-      <button className="button button--small" type="button" disabled={!environment} onClick={() => { if (environment) syncBusinessClock(environment); }}>从逻辑时钟同步账单时间</button>
-      <form className="form-grid" onSubmit={registerBill}>
-        <label><span>Bill ID</span><input required value={bill.billId} onChange={(e) => setBill({ ...bill, billId: e.target.value })} /></label>
-        <label><span>Revision</span><input required type="number" min="1" value={bill.revision} onChange={(e) => setBill({ ...bill, revision: e.target.value })} /></label>
-        <label><span>商户</span><input required value={bill.merchantId} onChange={(e) => setBill({ ...bill, merchantId: e.target.value })} /></label>
-        <label><span>渠道</span><input required value={bill.channelId} onChange={(e) => setBill({ ...bill, channelId: e.target.value })} /></label>
-        <label><span>业务日期</span><input required type="date" value={bill.businessDate} onChange={(e) => setBill({ ...bill, businessDate: e.target.value })} /></label>
-        <label><span>时区</span><input required value={bill.businessTimezone} onChange={(e) => setBill({ ...bill, businessTimezone: e.target.value })} /></label>
-        <label><span>记录 ID</span><input required value={bill.recordId} onChange={(e) => setBill({ ...bill, recordId: e.target.value })} /></label>
-        <label><span>交易类型</span><select value={bill.transactionKind} onChange={(e) => setBill({ ...bill, transactionKind: e.target.value })}><option>PAYMENT</option><option>REFUND</option></select></label>
-        <label className="span-2"><span>外部交易号</span><input required value={bill.externalTransactionId} onChange={(e) => setBill({ ...bill, externalTransactionId: e.target.value })} /></label>
-        <label><span>金额</span><input required value={bill.amount} onChange={(e) => setBill({ ...bill, amount: e.target.value })} /></label>
-        <label><span>状态</span><select value={bill.status} onChange={(e) => setBill({ ...bill, status: e.target.value })}><option>SUCCESS</option><option>FAILURE</option></select></label>
-        <label className="span-2"><span>记录发生时间（ISO）</span><input required value={bill.occurredAt} onChange={(e) => setBill({ ...bill, occurredAt: e.target.value })} /></label>
-        <label className="span-2"><span>幂等键</span><input required value={bill.idempotencyKey} onChange={(e) => setBill({ ...bill, idempotencyKey: e.target.value })} /></label>
-        <button className="button button--danger span-2" disabled={loading} type="submit">发布 immutable revision</button>
-      </form>
-    </section>
+    <BillRevisionEditor service={service} environment={environment} fixtureId={fixtureId}
+      onPublished={(billId, revision) => setBillScript((old) => ({ ...old, billId, revision: String(revision) }))} />
 
     <div className="two-column-layout">
       <section className="panel"><h3><Beaker size={18} />通知 sender 脚本</h3><CapabilityNote capability={notificationCapability} />

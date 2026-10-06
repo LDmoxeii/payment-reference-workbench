@@ -27,6 +27,7 @@ import {
   action,
   alternativeAction,
   compact,
+  createBillPublicationClock,
   mapManualReview,
   mapNotification,
   mapOperation,
@@ -81,10 +82,12 @@ export class Cap4kPaymentAdapter implements PaymentBackendAdapter {
   private readonly fixtureId: string;
   private readonly actorAlias: string;
   private readonly registeredBillIds = new Map<string, Set<string>>();
+  private readonly billPublishedAt: ReturnType<typeof createBillPublicationClock>;
 
   constructor(private readonly options: AdapterRuntimeOptions) {
     this.client = new HttpClient({ baseUrl: options.apiBaseUrl, fetchImpl: options.fetchImpl });
     this.fixtureId = options.fixtureId ?? "reference-default";
+    this.billPublishedAt = createBillPublicationClock(() => this.now());
     this.actorAlias = options.actorAlias ?? "fixture-reconciliation-operator";
     this.profile = {
       id: "cap4k",
@@ -231,7 +234,7 @@ export class Cap4kPaymentAdapter implements PaymentBackendAdapter {
       }
       case "REGISTER_BILL": {
         const input = command.input;
-        const publishedAt = this.now().toISOString();
+        const publishedAt = this.billPublishedAt(input);
         const response = await this.client.post<JsonRecord>("/reference-fixtures/bills", {
           channelId: input.channelId,
           billIdentity: input.billId,
@@ -245,14 +248,14 @@ export class Cap4kPaymentAdapter implements PaymentBackendAdapter {
           publishedAt,
           unavailableReadCount: input.unavailableReadCount,
           records: input.records.map((item) => ({
-            recordIdentity: item.recordId,
+            recordIdentity: item.recordIdentity ?? item.recordId,
             channelTransactionIdentity: item.externalTransactionId,
             transactionKind: item.transactionKind,
             money: toWireMoney(item.money),
-            rawStatus: item.status,
+            rawStatus: item.rawStatus ?? item.status,
             occurredAt: item.occurredAt ?? publishedAt,
-            receivedAt: item.occurredAt ?? publishedAt,
-            rawEvidence: `reference://workbench/bills/${input.billId}/records/${item.recordId}`,
+            receivedAt: item.receivedAt ?? item.occurredAt ?? publishedAt,
+            rawEvidence: `reference://workbench/bills/${input.billId}/revisions/${input.revision}/records/${item.recordIdentity ?? item.recordId}`,
           })),
         });
         this.rememberBillId(
@@ -477,7 +480,8 @@ export class Cap4kPaymentAdapter implements PaymentBackendAdapter {
         merchantId: text(value.merchantId) ?? "",
         currency,
         businessDate: text(value.businessDate) ?? null,
-        complete: completeness === "COMPLETE",
+        businessTimezone: text(revision.businessTimezone) ?? text(value.businessTimezone) ?? null,
+        complete: completeness === "COMPLETE" ? true : completeness === "PARTIAL" ? false : null,
         completeness,
         payloadFingerprint: text(revision.payloadFingerprint) ?? null,
         rawEvidence: text(revision.rawEvidence) ?? null,
@@ -563,7 +567,7 @@ export class Cap4kPaymentAdapter implements PaymentBackendAdapter {
   }
 
   getReconciliationRun(runId: string): Promise<ReconciliationRun> {
-    return this.client.get<JsonRecord>(`/reconciliation-runs/${pathId(runId)}`).then((value) => this.cap4kRun(value));
+    return this.client.get<JsonRecord>(`/reconciliation-runs/${pathId(runId)}`).then((value) => this.cap4kRun(value, true));
   }
 
   async listReconciliationRuns(request: PageRequest): Promise<PageResult<ReconciliationRun>> {
@@ -642,8 +646,8 @@ export class Cap4kPaymentAdapter implements PaymentBackendAdapter {
     return settlement;
   }
 
-  private cap4kRun(value: JsonRecord): ReconciliationRun {
-    const run = mapReconciliationRun("cap4k", value);
+  private cap4kRun(value: JsonRecord, detailResponse = false): ReconciliationRun {
+    const run = mapReconciliationRun("cap4k", value, detailResponse);
     run.actions = run.actions.map((item) => item.kind === "COMPLETE_RECONCILIATION"
       ? alternativeAction(
         "COMPLETE_RECONCILIATION",

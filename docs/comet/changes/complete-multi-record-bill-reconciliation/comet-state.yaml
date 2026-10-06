@@ -1,0 +1,541 @@
+schema: comet.native.v4
+name: complete-multi-record-bill-reconciliation
+language: zh-CN
+phase: archive
+status: done
+state_version: 12
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: 5acbaf6d7a149641669539ae8873f6c1c08605d454b9e277300320d185bd2557
+spec_changes:
+  - capability: payment-workbench
+    operation: modify
+    source: specs/payment-workbench/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 2
+  attempt: 2
+  retry_epoch: 0
+  failed_iteration_count: 1
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: specs/payment-workbench/spec.md
+    text: 同一页面通过配置切换两个后端 - GIVEN 分别以 WOW 与 CAP4K 配置启动同一版本工作台 - WHEN
+      用户访问支付、退款、对账、结算、人工核对和 timeline 页面 - THEN 页面代码与业务组件不变，且只调用统一服务 - AND
+      两个适配器分别封装实际路径、方法、字段、header、回执、分页、错误和收敛差异 - AND 新增第三适配器不要求修改已有业务页面
+    result: passed
+    reason:
+      text: 源码业务页面仅依赖统一服务；集中 factory 封装两端协议。当前同版 UI 分别连 WOW 5173/18080 与 CAP4K
+        5174/18081，实际完成支付、退款、对账、结算、review/timeline；Runtime backend-isolation
+        与契约检查通过。
+      truncated: false
+  - id: A2
+    source: specs/payment-workbench/spec.md
+    text: 受理、读取和错误语义保持完整 - GIVEN
+      后端分别返回同步拒绝、ACCEPTED、ALREADY_ACCEPTED、READ_ONCE、POLL、RESOURCE_NOT_READY
+      或观察超时 - WHEN 统一服务处理响应并驱动页面观察 - THEN 同步拒绝只形成 ApiError，不伪造 Operation 或资源 -
+      AND receipt、Operation、资源业务状态和 finality 分层展示 - AND POLL 按
+      operationUrl/resourceUrl/retryAfterMs 收敛，超时只形成 OBSERVATION_TIMEOUT - AND
+      Money 不经过 JavaScript 浮点，源错误和 correlationId 可查看
+    result: passed
+    reason:
+      text: 复核 HttpClient、observeReceipt 与 Money：同步拒绝不生成
+        receipt，READ_ONCE/POLL、projection not-ready、观察超时及继续观察均有当前候选测试。实际 UI 显示独立
+        receipt/Operation/resource/finality；Money 用 minor 字符串与 BigInt。
+      truncated: false
+  - id: A3
+    source: specs/payment-workbench/spec.md
+    text: 从支付意图推进到可信结果 - GIVEN 合格商户、渠道、policy 与逻辑时钟 - WHEN 用户创建支付、创建并提交 attempt，再通过
+      reference 入口注入 SUCCESS、FAILURE 或 UNKNOWN - THEN
+      页面依次显示支付、attempt、提交回执、结果收件、Operation 和最终性 - AND ACCEPTED
+      不显示为已付款，首个可信成功只显示一个 PaymentSuccessFact - AND
+      duplicate/invalid/unknown-reference/late/conflicting 收件均可查看且不覆盖已确定事实 - AND
+      到期、重试与成功后禁建新 attempt 的可执行状态来自统一资源动作 - AND 创建或提交 attempt 后无需手工刷新即可看到权威
+      attempt、submission/result receipts 与更新后的 actions - AND 切换 Payment 或
+      Attempt 时所有关联字段与命令 identity 按当前上下文更新，不携带上一资源或上一 Attempt 的值 - AND
+      常规模式只选择已知且当前可操作的 Attempt，未知引用必须显式进入异常实验模式
+    result: passed
+    reason:
+      text: 本次两端真实 UI 创建100元支付、创建/提交 Attempt、接收可信成功；自动详情刷新与唯一 Attempt
+        选择已观察，成功后禁建。切换到旧支付级联外部号正确；冲突失败仅追加收件且成功不回退。UNKNOWN/replay 分支本次 paired
+        live 两端通过，其他收件字段与异常模式由当前实现/Runtime测试补足。
+      truncated: false
+  - id: A4
+    source: specs/payment-workbench/spec.md
+    text: 部分退款、结果收敛与预算转换 - GIVEN 成功支付仍有可退款金额 - WHEN 用户申请部分退款、创建并提交 attempt，再注入成功、失败或
+      UNKNOWN 结果 - THEN 退款、attempt、receipts、operation 和预算变化可独立观察 - AND
+      相同申请重放不重复预占，超额申请同步拒绝 - AND 成功只转换一次预算，整体失败只释放一次，UNKNOWN/review 继续占用 - AND
+      成功后的迟到失败不回退成功退款或预算事实 - AND 创建或提交 RefundAttempt 后无需手工刷新即可看到权威
+      attempt、收件和预算变化 - AND 切换退款或 Attempt 时渠道退款号、渠道、identity 和幂等键不会残留其他上下文的数据 -
+      AND 已有未决 Attempt 时创建动作禁用并解释原因，唯一可提交 Attempt 自动选中且目标 Refund ID 清晰可见
+    result: passed
+    reason:
+      text: 本次两端真实 UI 部分退款20元，Attempt
+        创建/提交后自动显示收件，未决禁建且唯一项选中。预算20预占→20成功/0预占/80可退，HTTP退款成功。幂等、UNKNOWN及迟到结果保持由当前
+        paired live、Money/adapter与上下文测试支持。
+      truncated: false
+  - id: A5
+    source: specs/payment-workbench/spec.md
+    text: 筛选五类列表并使用 opaque cursor 翻页 - GIVEN 后端存在跨 merchant、status、finality、时间且含相同
+      sortTime 的五类资源 - WHEN 用户筛选、小页翻页、返回首屏或更换筛选条件 - THEN 页面展示后端权威结果，不以
+      localStorage 或前端全量聚合代替 - AND nextCursor 原样回传，筛选变化清空旧 cursor - AND
+      首屏后新建的更靠前记录不回填旧 cursor 的后续页 - AND INVALID_CURSOR 显示为可理解错误且不会静默回到错误数据集 -
+      AND 点击任一列表详情都会按稳定 ID 读取权威完整资源，摘要缺少 attempts、receipts 或历史时也不会显示成空详情 - AND
+      快速连续打开多个资源时最终只展示最后选择的详情，动作后详情和相应列表自动失效并重新读取
+    result: passed
+    reason:
+      text: 五类列表统一调用权威 GET/POST-search，源码原样传递 opaque
+        cursor，无前端全量数据集代替。实际两端支付列表5条翻页到第2页1条、返回/筛选重置首屏；公开HTTP
+        INVALID_CURSOR稳定拒绝。列表摘要只导航稳定ID并权威详情读取、迟到响应隔离及动作刷新有Runtime测试；通知摘要缺attempts点击后仍读出完整1次投递。
+      truncated: false
+  - id: A6
+    source: specs/payment-workbench/spec.md
+    text: 从账单 revision 运行对账并处置差异 - GIVEN reference bill provider 中存在稳定 bill/revision
+      和可关联的平台事实 - WHEN 用户登记/发现账单、触发 Run、查看差异、提交带责任字段的处置或
+      FactConfirmation，并在满足条件后完成 - THEN 高 revision 前进且迟到低 revision 不回退，旧 run 与
+      effectiveRun 可区分 - AND
+      MATCHED、PLATFORM_ONLY、CHANNEL_ONLY、AMOUNT/CURRENCY/STATUS_MISMATCH、DUPLICATE、UNMATCHED
+      及双方证据可查看 - AND 原平台事实、账单、初始差异和追加处置分别保留 - AND 未决 blocking difference
+      阻断完成/结算，只有明确结论解除相应阻断
+    result: passed
+    reason:
+      text: 本次双端旧Run 4/1/3并阻断，新完整revision Run
+        4/4/0；旧Run原始数组不变并可区别effective/superseded。当前 paired live
+        真正处置CHANNEL_ONLY并保留责任历史；分类别名、双方原始证据和动作限制经契约/组件检查，未自动处置。
+      truncated: false
+  - id: A7
+    source: specs/payment-workbench/spec.md
+    text: 准备、冻结并安全执行结算 - GIVEN 周期内存在收入、退款、费用、调整、未决、UNKNOWN 和已结算候选 - WHEN 用户
+      prepare、查看构成、confirm、execute 并提交三类结果，或在允许时 void/replacement - THEN
+      每个候选均有来源、纳入/排除和 reason，净额等于 included items 汇总 - AND confirm 后
+      scope/items/Money/version 冻结 - AND SUCCESS 只形成一次，明确 FAILURE 后的新 attempt
+      受控，UNKNOWN 保持原 execution identity 并禁止重付 - AND 负净额进入人工核对，void/replacement
+      不绕过成功事实、UNKNOWN 或 scope 唯一性
+    result: passed
+    reason:
+      text: 两端UI
+        prepare/confirm/execute/SUCCESS完成；prepared/frozen原始items或lines相同，INCLUDED有符号汇总27820分等于net。执行期间UNKNOWN状态禁止新execution，成功终态各只有1次execution。FAILURE、负额、void/replacement限制复核当前动作实现与Runtime契约测试；未声称本次逐个资金实验都实际执行。
+      truncated: false
+  - id: A8
+    source: specs/payment-workbench/spec.md
+    text: 从 payment timeline 追踪并完成人工核对 - GIVEN 一笔支付经历
+      attempts、receipts、退款预算、通知、bill/revision、Run/difference、Settlement 和 review
+      - WHEN 用户打开 payment timeline、通知详情和 ManualReviewItem，并提交完整责任字段 - THEN
+      timeline 按 recordedAt ASC、eventId ASC 稳定展示全部关联事件且保留 occurredAt - AND
+      review 显示 related refs、blocking scopes、证据和追加处置历史 - AND 缺少可信 actor
+      context、reason 或 evidence 时同步拒绝且无副作用 - AND 成功处置展示后端解析的
+      actorId、服务端时间、reason、evidence 和解除阻断结果
+    result: passed
+    reason:
+      text: 同一种子支付本次UI读取32/51事件的全链路timeline（后续新增处置后CAP4K为54），含bill/revision、Run、退款、结算、通知及review。两端冲突review显式处置后RESOLVED/FINAL，展示服务端actor/reason/evidence和追加历史；CAP4K缺alias同步拒绝、无新处置，当前视口错误可见。稳定排序、分页到底及责任字段保护有当前Runtime测试。
+      truncated: false
+  - id: A9
+    source: specs/payment-workbench/spec.md
+    text: 使用 reference 实验复现异常并重复闭环 - GIVEN 固定 merchant/channel/actor
+      alias、policy、clock 和 executor scripts - WHEN 用户分别构造
+      success、failure、unknown、duplicate、invalid、unknown-reference、late、conflict
+      与暂不可读场景并从干净运行重复闭环 - THEN 页面记录本次 fixture/policy/clock，且业务结果由后端裁决 - AND
+      callback 不接受客户端自报 verification，CAP4K evidence registration 与 WOW fixture
+      token 差异由适配器处理 - AND 相同输入的规范化状态、错误、关联、排序和副作用可重复，同 identity 不产生第二业务效果
+    result: passed
+    reason:
+      text: 本次固定fixture/clock与专用服务真实重复发布、支付/退款/结算及UNKNOWN/manual-review等价分支，同identity重放无第二业务效果。复核四类reference脚本、WOW
+        token/CAP4K registry可信边界和异常模式；Runtime脚本/可信收件契约通过。没有把后端旧67/67报告当证据。
+      truncated: false
+  - id: A10
+    source: specs/payment-workbench/spec.md
+    text: 在桌面和移动视口完成结构化业务操作 - GIVEN 用户不熟悉后端 DTO，分别使用桌面和移动视口 - WHEN
+      用户完成支付、退款、对账、结算和人工核对的主要操作 - THEN 表单使用统一业务术语、合理默认值、必填校验和上下文预填 - AND
+      用户无需知道当前后端路由或手写常用动作 JSON - AND 长 ID、Money、状态、证据和错误可读/可复制，控件不重叠 - AND
+      危险动作有明确确认，成功/失败反馈不丢失当前上下文 - AND 创建、提交和可信结果区域清楚显示当前目标资源
+      ID，切换资源后表单不残留上一资源的关联字段或 identity - AND 已知 Attempt 通过选择器操作并正确级联渠道与外部交易号，未知
+      Attempt 只在显式异常实验模式中自由输入 - AND 不可执行动作显示禁用原因和可执行的下一步，唯一可提交 Attempt 自动选中
+    result: passed
+    reason:
+      text: 真实桌面完成主要结构化流程，390x844下编辑器/退款/Attempt禁用原因/责任错误及确认弹窗截图已检查，无重叠或不可达控件。确认前不发命令、取消保留草稿；目标资源、Attempt选择器、级联和上下文隔离由实际操作及Runtime组件测试支持。
+      truncated: false
+  - id: A11
+    source: specs/payment-workbench/spec.md
+    text: 请求失败或异步观察暂未收敛 - GIVEN 查询或命令发生字段错误、业务冲突、网络失败、Projection 暂不可见或观察超时 - WHEN
+      页面处理错误并允许用户继续 - THEN 保留表单输入、资源上下文和最近 receipt - AND 展示稳定
+      code、消息、details、correlationId、retryable 和必要源诊断 - AND
+      可重试问题提供安全重试/手动刷新，不可重试问题指向需修改字段或现有资源 - AND 超时不显示为领域失败，后续仍可按 operationId 或
+      resource ref 继续观察 - AND 用户在长页面底部触发错误时无需滚回页首即可看到错误码和摘要，关闭通知后页内完整诊断仍然存在 -
+      AND 命令同步拒绝与已受理后的观察失败明确区分，后者保留 receipt、Operation ID、资源上下文和继续观察能力 - AND
+      Operation 或 Projection 稍后收敛时，当前详情和关联权威列表自动更新，不要求用户手工刷新整页
+    result: passed
+    reason:
+      text: 实际移动端BILL_DRAFT_INVALID与RESPONSIBILITY_ACTOR_REQUIRED在底部当前视口可读、输入保留。源码及当前Runtime测试区分同步拒绝/已受理观察失败，保留真实receipt并允许继续Operation或回读，超时不是领域失败；异步详情/列表刷新与迟到响应保护均核实。
+      truncated: false
+  - id: A12
+    source: specs/payment-workbench/spec.md
+    text: 按文档切换后端并注册第三适配器 - GIVEN 开发者获得仓库且不修改页面代码 - WHEN 按 README 分别启动 WOW/CAP4K
+      模式，或实现一个满足统一契约的新 adapter - THEN 应用可以类型检查、测试、构建和连接对应后端 - AND adapter
+      注册集中，配置缺失时给出明确启动或连接错误 - AND 新 adapter 只需实现服务契约、映射、配置注册和契约测试 - AND
+      文档不再声称两端缺少列表、独立 attempt、refund result 或 timeline
+    result: passed
+    reason:
+      text: README当前启动配置、集中注册、第三adapter契约说明和实际按钮学习路径已完整复核；当前Runtime
+        typecheck、232测试、build及diff-check通过，两个配置实际连接服务。无安装、无页面后端分支，文档未再宣称已有公开能力缺失。
+      truncated: false
+  - id: A13
+    source: specs/payment-workbench/spec.md
+    text: 经工作台连接真实 WOW 完成代表性闭环 - GIVEN 从干净 reference 运行启动真实 WOW 服务与前端 WOW 配置 - WHEN
+      经工作台创建并成功支付、完成部分退款、发布账单并运行/处置对账、准备/确认/执行结算、查看 review/notification/timeline
+      和五类列表 - THEN 所有请求命中真实 WOW HTTP surface，POLL/RESOURCE_NOT_READY 按 readAfter
+      收敛 - AND 页面显示统一模型、权威分页、完整证据与最终状态 - AND 创建/提交支付与退款 Attempt
+      后页面自动显示权威详情和列表变化，错误通知在当前视口可见，资源与 Attempt 级联不串用旧值 - AND 过程不修改、清理或提交 WOW
+      工作树，也不复用后端既有 67/67 报告代替本次前端证据
+    result: passed
+    reason:
+      text: 当前候选经真实WOW
+        UI完成新支付/部分退款Attempt及自动刷新、两版账单纠正、新Run完成、结算冻结与成功、review责任处置、notification/timeline和权威列表；POLL真实receipt可见。证据为本次截图/HTTP及当前检查，不改清理WOW源码或交易。
+      truncated: false
+  - id: A14
+    source: specs/payment-workbench/spec.md
+    text: 经工作台连接真实 CAP4K 完成代表性闭环 - GIVEN 从干净 H2 reference 运行启动真实 CAP4K 服务与前端 CAP4K
+      配置 - WHEN 经工作台执行与 WOW 等价的支付、退款、账单/对账、结算、review/notification/timeline
+      和五类列表流程 - THEN 所有请求命中真实 CAP4K HTTP surface，READ_ONCE/Operation 语义正确 - AND
+      actor alias 由 X-Reference-Actor-Context 传输，callback evidence 由服务端 registry
+      验证 - AND 页面显示统一模型、权威分页、完整证据与最终状态 - AND 创建/提交支付与退款 Attempt
+      后页面自动显示权威详情和列表变化，错误通知在当前视口可见，资源与 Attempt 级联不串用旧值 - AND 过程不修改、清理或提交 CAP4K
+      工作树，也不复用后端既有 67/67 报告代替本次前端证据
+    result: passed
+    reason:
+      text: 当前候选经真实CAP4K
+        UI完成等价支付/退款、两版账单、新Run自动完成、结算与唯一成功、review/notification/timeline及列表；READ_ONCE与真实Operation正确，callback
+        registry核验及可信actor解析由公开回读和本次live检查支持。未改清理CAP4K源码或交易。
+      truncated: false
+  - id: A15
+    source: specs/payment-workbench/spec.md
+    text: 同一业务场景在两个后端得到等价观察 - GIVEN 两端使用等价 merchant/channel/actor、Money、policy、clock
+      与 executor script - WHEN 分别通过同一前端服务流程执行支付到结算闭环及一个 UNKNOWN/人工处置分支 - THEN
+      规范化 Money、status、finality、ApiError、关联、排序、预算、阻断和副作用一致 - AND WOW 平铺 resource
+      ref 与 CAP4K 嵌套 resource、GET 与 POST search、actor body/header、fixture
+      token/evidence registry、trace/timeline 路径及 void/replacement 组合差异均不可泄漏到页面 -
+      AND 两端均以相同的通知、权威详情刷新、表单上下文隔离、Attempt 选择和禁用原因表达等价业务状态 - AND 不比较随机内部 ID
+      字面值，也不要求两个框架采用相同事务或收敛方式
+    result: passed
+    reason:
+      text: 本次运行当前paired-consistency-smoke文件实际2/2通过：完整成功闭环与UNKNOWN人工处置，比较Money/status/finality/错误/关联/排序/预算/阻断/幂等副作用；UI两端上下文选择、自动刷新和确认行为也等价。源接口时间投影差异另列风险，不以随机内部ID或框架事务方式作比较。
+      truncated: false
+  - id: A16
+    source: specs/payment-workbench/spec.md
+    text: 多记录草稿编辑与结构化发布 - GIVEN 当前 reference 环境可读取真实逻辑时钟，用户已有可关联的支付和退款事实 - WHEN
+      用户在同一 Bill/revision 下添加三条 PAYMENT 和一条 REFUND，逐行编辑、复制、删除，再确认发布 - THEN 页面无需
+      JSON 即可编辑共享商户/渠道/币种/业务日期/时区与各行业务 ID/外部交易号/金额/渠道状态/occurredAt，单行修改不影响其他行 -
+      AND 复制单行生成新业务行 ID，复制整版则保留已有业务行 ID；退款独立作为 REFUND 行，不能按净额合并 - AND
+      新增行以真实逻辑时钟预填时间，历史或手工编辑的时刻不被加载环境自动覆盖；显式同步需清楚显示作用范围 - AND 发布一次提交完整记录数组与统一
+      Money；取消确认不发请求，发布中禁止重复提交 - AND 发布后按统一结果处理真实 receipt/Operation 或 applied
+      结果，并自动回读同一 Bill 与完整 revision 链；不虚构两端都存在 Operation，不自动运行对账
+    result: passed
+    reason:
+      text: 两端真实UI结构化发布3PAYMENT+1REFUND完整数组，WOW实际复制/删除单行并验证新业务ID，整版复制保留旧ID；时间取2056逻辑时钟。取消确认404证明无发布；发布后WOW真实receipt/Operation、CAP4K
+        applied均权威回读，不自动Run。
+      truncated: false
+  - id: A17
+    source: specs/payment-workbench/spec.md
+    text: 完整 revision 纠正与不可变历史 - GIVEN Bill 的 revision 1 只有一条已匹配支付记录，权威
+      currentRevision 可读取，旧 Run 保留一匹配三差异 - WHEN 用户查询 Bill、选择已发布
+      revision、确认复制为新草稿，并补齐另外两笔支付和一笔退款，再发布完整新 revision - THEN 草稿复制原版全部可编辑业务字段，目标
+      revision 是权威 currentRevision + 1，不是所选历史 revision +
+      1；版本解析与递增不失真，缺失或溢出给出明确错误 - AND 草稿保留业务 recordIdentity、原时区、Money、渠道原状态与
+      occurredAt，不将 CAP4K 资源 UUID 偷换为业务记录 ID，不使用当前环境时区覆盖原时区 - AND
+      原发布时间、fingerprint、rawEvidence
+      等只读证据留在旧版本，新版本生成自身证据；有编辑内容的旧草稿被替换前明确确认，查询失败或迟到响应不覆盖当前草稿 - AND
+      新版本查询包含完整四行，旧 revision 全对象不变，旧 Run 的原始明细及处置历史不被前端改写 - AND
+      页面明确说明每版是完整快照，给出后续运行对账所需的 Bill/revision/商户/渠道/币种/业务日期/时区；不静默合并历史版本
+    result: passed
+    reason:
+      text: 实际从仅1条revision1复制revision2补齐4条，保留业务identity、时区、金额、状态、occurredAt；CAP4K
+        UUID未误作业务ID且商户缺失要求显式确认。HTTP比较两端旧revision完整对象与旧Run完整原始明细均不变。latest+1/overflow、旧草稿确认、迟到查询保护由当前测试补足。
+      truncated: false
+  - id: A18
+    source: specs/payment-workbench/spec.md
+    text: 发布内容冻结与安全重试 - GIVEN 一个合法账单发布已经首次发出但网络响应丢失，随后逻辑时钟或客户端时间变化 - WHEN
+      用户对同一未修改发布继续观察或安全重试，或者编辑内容后开始一个新发布 - THEN 同一发布保持 Bill/revision、记录内容、业务
+      ID、幂等键、发布时间、缺省时间与所有派生传输字段稳定，不因适配器再次取 now 而冲突或生成第二版事实 - AND 编辑业务内容后使用新的命令
+      identity；内容不同但目标 revision 已存在时保留后端稳定冲突，不把换幂等键描述为覆盖已发布 revision 的办法 - AND
+      业务冲突、无效输入、查询或网络错误在当前视口可见并保留草稿；已受理发布的观察失败保留真实 receipt 和继续观察能力 - AND
+      发布权威回读明确区分成功、尚不可读与失败，不能仅凭本地 records 或按前端缓存声称发布成功
+    result: passed
+    reason:
+      text: 两端UI安全重试并公开完整HTTP重放，同一revision不生成第二事实；WOW复用原Operation，CAP4K
+        idempotentReplay=true。复核冻结publication输入及派生字段，当前Runtime测试模拟丢响应后clock变化仍字节相同、编辑换identity、观察失败保留receipt且仅继续读。未声称真实注入网络丢包。
+      truncated: false
+  - id: A19
+    source: specs/payment-workbench/spec.md
+    text: 合法输入与异常实验边界 - GIVEN 草稿含多个记录且后端支持零金额、空账单和重复外部交易号的 reference 实验 - WHEN
+      用户输入重复业务行 ID、无法精确转换的金额、无效发生时刻或无效/溢出 revision，或显式构造上述合法实验 - THEN
+      无效基础字段定位到共享字段或具体行，保持其他输入，校验失败不发请求；Money 以 minor 整数字符串精确传输 - AND 同 revision
+      的业务行 ID 唯一，但重复外部交易号可以带明确实验提示发布，用于渠道重复记录验收，不被前端去重或合并 - AND 0
+      金额不因正数校验被排除；空记录数组以明确空账单说明及发布确认允许使用，不自动填充一条假记录 - AND 加载的非 SUCCESS/FAILURE
+      原状态可保留并显示，不静默改写为成功；原始证据保持只读且可查看
+    result: passed
+    reason:
+      text: 复核bill-draft/契约测试：重复业务ID、精度、严格时间及revision定位拒绝；BigInt大金额不失真、WOW
+        Int32边界独立；零额/空数组允许并显示实验提示、重复外部号不去重、非标准原状态与原始证据保留。WOW移动端实际20.001逐行拒绝、保持其余草稿，修正20.00后成功。
+      truncated: false
+  - id: A20
+    source: specs/payment-workbench/spec.md
+    text: 匹配与真实差异汇总筛选 - GIVEN 后端完整 Run 明细为一条 MATCHED 和三条 PLATFORM_ONLY，且权威计数与实际明细一致
+      - WHEN 用户打开详情并切换全部、仅差异和仅匹配 - THEN 标题为对账明细，默认全部四行；明确显示总明细 4、匹配 1、真实差异
+      3，三种筛选分别展示 4/3/1 行 - AND MATCHED 显示匹配，真实差异是全部非 MATCHED
+      类型；已解决异常仍属于差异历史，未知分类保留原类型或诊断并作为非匹配展示 - AND 后端
+      matchedCount/differenceCount/unresolvedDifferenceCount 等权威字段被统一模型保留；缺失不默认
+      0，仅确认完整明细时才允许从明细补充计数，并区分计数来源 - AND 汇总指本 Run 结果，不是账单记录条数或 Run
+      分页列表总数；明细不完整时不虚构缺少的匹配行或全局 total - AND 一个由后端真实裁决的全匹配新 Run 显示差异 0
+      和匹配数，并允许查看匹配证据；不能仅通过筛选把旧 Run 显示成权威无差异 - AND 快速切换 Run
+      或筛选时清除不属于当前上下文的选择，迟到响应不覆盖最后选择的 Run
+    result: passed
+    reason:
+      text: 两端旧Run真实UI默认4行、权威4/1/3，筛选4/3/1；新Run真实4/4/0并可查看匹配证据。计数来源、不完整未知计数、已处置/未知分类、快速切换选择清理经源码与当前Runtime测试核实。
+      truncated: false
+  - id: A21
+    source: specs/payment-workbench/spec.md
+    text: 阻断与处置语义保持独立 - GIVEN 明细包含正常 MATCHED、未解决异常、已处置异常，或匹配但未决/阻断的记录，并可能缺失权威阻断值 -
+      WHEN 用户查看明细、证据和差异处置区域，或切换过滤条件 - THEN 未解决数与阻断明细数分开表达，匹配但未决/阻断的记录不能因 MATCHED
+      分类被忽略，并指向相应权威核对动作或明确原因 - AND Run 结算阻断直接展示后端 true/false/未知，不由差异数量、resolved
+      或筛选后可见行数推算；零差异但不完整或存在资格阻断时仍明确提示 - AND 正常 MATCHED
+      不默认选择为人工差异，不提供可提交的差异处置入口；点击它只查看匹配证据，篡改选择也不得提交正常匹配行 - AND 非 MATCHED 的
+      DifferenceDisposition/FactConfirmation 继续保留后端动作限制、完整
+      actor/reason/evidence、同步拒绝与无副作用约束；已处置异常的原分类和追加历史不消失 - AND 不自动接受差异、完成 Run
+      或解除结算阻断；所有业务变化均来自用户显式操作及权威回读
+    result: passed
+    reason:
+      text: 旧Run后端阻断true、新Run
+        false直接显示；匹配分类/未决/阻断独立。实际选正常MATCHED责任处置disabled，组件测试伪造submit仍不发命令；MATCHED但未决、缺三态、不完整和追加差异历史覆盖，业务变化均显式操作及权威回读。
+      truncated: false
+  - id: A22
+    source: specs/payment-workbench/spec.md
+    text: 双后端真实多记录纠正与结算闭环 - GIVEN WOW 与 CAP4K
+      分别运行真实服务，同一前端通过配置接入等价且隔离的商户/渠道/业务日/时区、三笔各 100 元成功支付和一笔 20 元成功退款，并使用权威成功外部号
+      - WHEN 经真实工作台 UI 发布只含第一笔支付的 revision 1、运行对账，随后查询并复制为 revision
+      2、补齐完整四行、发布和建立有效新 Run，再按既有动作完成对账并准备/确认/执行结算成功 - THEN 旧 Run 显示总 4/匹配 1/差异 3
+      及权威阻断，新 Run 显示总 4/匹配 4/差异 0 与权威结算资格；原 Bill/revision、旧 Run 全部原始明细保持不变 - AND
+      两端实际接收的记录身份、类型、金额、外部号、状态、发生时刻和业务时区与编辑器一致，完整新版本和重放通过公开 HTTP 回读证明 - AND
+      结算构成纳入实际支付/退款、权威费用与调整，净额与 included items 汇总一致；执行成功只产生一次资金事实，不预设净额一定为 280 元
+      - AND 操作确实穿过两个后端公开 HTTP 和真实 UI；相同页面没有后端分支，不使用 mock、内部对象或两后端旧验收报告替代本轮证据 -
+      AND 证据绑定当前 candidate、配置、fixture、逻辑时钟、请求响应和最终断言；confirm 弹窗显式处理，人工等待不重复触发命令
+      - AND 不修改或清理后端工作树，不清空用户交易，验收服务/fixture 隔离；如临时调整共享逻辑时钟必须记录并恢复原状态
+    result: passed
+    reason:
+      text: 当前candidate双端真实UI
+        1条rev1→Run4/1/3→完整4条rev2→新Run4/4/0→结算SUCCESS完成；权威外部号来自本次公开回读，records所有字段一致且重放证实。两端净额27820=30000-2000-180，included汇总与冻结一致，各唯一成功execution。截图/请求响应/断言绑定candidate/fixture/clock，确认显式处理，旧全对象/原明细不变，时钟收尾已恢复原值。
+      truncated: false
+  - id: A23
+    source: specs/payment-workbench/spec.md
+    text: 学习说明与多行表单可用性 - GIVEN 学习者不熟悉后端 DTO，并分别使用桌面与 390x844 移动视口 - WHEN 按 README
+      和页面提示完成单条漏账实验、完整四行新版本纠正、匹配/差异筛选与后续结算 - THEN
+      文档按实际按钮说明业务字段与渠道外部号的来源、金额单位、业务时区、完整快照语义和匹配不等于无阻断；不要求手写常用 JSON - AND
+      多行输入、长业务 ID、金额、状态、逐行错误和通知可读，添加/复制/删除控件不重叠；适当局部滚动不导致页面操作不可达 - AND 示例三笔 100
+      元与一笔 20 元明确只是教学数据，实际操作使用真实回读值，不绑定用户截图随机 ID 或电脑当前日期 - AND README
+      给出完整账单纠正到权威无差异再结算的路径，以及故意保留差异时需人工核对的区别，不声称 revision 自动累加
+    result: passed
+    reason:
+      text: README/页面明确金额单位、真实成功外部号来源、时区、完整快照而非累加、匹配不等于解除资格阻断及人工差异路径。三笔100与退款20仅教学输入，实际用HTTP成功事实；桌面及390x844编辑/逐行错误/确认/长ID/按钮可用性截图实际检查。
+      truncated: false
+builder_handoff:
+  candidate_id: a0983c88-602b-489b-aa9f-86c06d7e3455
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:82e4a29e-7c40-4334-acf3-c32541c29f06
+  iteration: 2
+  summary:
+    text: 完成多记录完整账单编辑、旧版复制与不可变历史回读、冻结发布内容与重试、权威Run计数/分类筛选/三态阻断、MATCHED禁处置、安全revision解析与WOW
+      Int32适配、页面内显式确认及上下文取消，并补测试与README。辅助代理自然结束。当前双端专用服务/Vite仍运行；真实HTTP开发期各1/1通过，旧原生弹窗UI尝试未通过，必须由新的Verifier在当前候选上补真实UI/HTTP及移动视觉证据，不能使用旧报告替代。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+    - A7
+    - A8
+    - A9
+    - A10
+    - A11
+    - A12
+    - A13
+    - A14
+    - A15
+    - A16
+    - A17
+    - A18
+    - A19
+    - A20
+    - A21
+    - A22
+    - A23
+  checks:
+    - name:
+        text: confirmation-isolation-repair-targeted
+        truncated: false
+      result: passed
+      note:
+        text: 移除生产确认模块运行环境分支，组件测试直接mock统一确认接口；7个文件92/92通过，新增缺Host拒绝命令测试。上一候选完整检查仅隔离检查失败，已定向修复。
+        truncated: false
+    - name:
+        text: confirmation-components-targeted
+        truncated: false
+      result: passed
+      note:
+        text: 6 files 62/62；显式Node参数类型检查通过；未当作正式证据
+        truncated: false
+    - name:
+        text: bill-revision-and-affected-components-targeted
+        truncated: false
+      result: passed
+      note:
+        text: 7 files 70/70；默认npm run typecheck通过；git diff --check通过
+        truncated: false
+    - name:
+        text: development-multi-record-http
+        truncated: false
+      result: passed
+      note:
+        text: 此前专用双端各1/1完整漏账→完整四行→结算；TEMP证据仅开发期线索，本候选需Verifier复核
+        truncated: false
+    - name:
+        text: development-real-ui
+        truncated: false
+      result: not-run
+      note:
+        text: 旧原生对话框控制阻塞，未通过；新页面内确认已补齐，真实UI仍待独立验收
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: CAP4K原始渠道状态应按真实平台事实填写，示例SUCCEEDED；不任意改写非成功状态。
+      truncated: false
+    - text: WOW revision为Int32，适配器明确拒绝越界；CAP4K未缩为同一限制。
+      truncated: false
+    - text: 本轮UI与桌面/移动证据必须新Verifier实际完成；未验证不得标passed。
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-01T09:21:30.298Z
+blockers: []
+verification:
+  candidate_id: a0983c88-602b-489b-aa9f-86c06d7e3455
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:8fb8d61f-a4e2-4853-add2-b10389e6ce9b
+  iteration: 2
+  attempt: 2
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: frontend-check
+      name:
+        text: frontend-check
+        truncated: false
+      argv_display:
+        - text: -NoLogo
+          truncated: false
+        - text: -NoProfile
+          truncated: false
+        - text: -Command
+          truncated: false
+        - text: npm run check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 6780
+    - id: diff-check
+      name:
+        text: diff-check
+        truncated: false
+      argv_display:
+        - text: diff
+          truncated: false
+        - text: --check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 336
+  summary:
+    text: 全部23项逐项独立判断通过。复用当前候选Runtime typecheck/232
+      tests/build/diff-check有效回执；本次WOW与CAP4K真实UI/HTTP分别完成4/1/3→完整revision2→4/4/0→冻结→唯一SUCCESS结算，历史全对象/原明细不变，净额included汇总27820。补两端UI支付/退款自动刷新、冲突责任处置、timeline/notification/分页/移动视觉及当前paired
+      live
+      2/2。共享时钟已恢复2056-02-10T06:00:00Z。证据见TEMP/verifier-v7-multirecord-http.json、verifier-v7-ui-observations.json、verifier-v7-paired-live-check.json及verifier-v7-*.jpg；源接口投影与未实际故障注入边界列风险，未接受/归档。
+    truncated: false
+  risks:
+    - text: 仅reference学习环境，不代表生产资金、真实渠道或安全认证验收。
+      truncated: false
+    - text: 实际未注入网络丢包/进程崩溃；发布丢响应和clock变化的冻结行为使用当前Runtime测试并以真实重放补证，不把模拟当故障现场。
+      truncated: false
+    - text: CAP4K公开搜索/ManualReview读模型存在源时间投影早8小时：支付详情createdAt=2057-03-11T06:00Z，search
+        sortTime=2057-03-10T22:00Z；settlement详情periodStart=2056-02-09T16:00Z，search=08:00Z。前端保留源值，本次未获授权修改后端；涉及这些时间的展示/过滤应以详情与源诊断核实。
+      truncated: false
+    - text: CAP4K通知列表摘要不含delivery attempts，当前列表显示0而详情权威回读为1；详情读取正确，不把摘要当完整投递事实。
+      truncated: false
+    - text: CAP4K支付创建成功后创建表单使用通用默认DEFAULT；新建前应核对环境支付方式CARD。此重复创建默认值未进行额外失败命令实验，本次创建/Attempt上下文均已显式核实。
+      truncated: false
+    - text: 默认Runtime套件4个live测试跳过不计通过；本次另执行paired live
+        2/2与双端真实UI/HTTP闭环。负净额、全部无效callback与每个void/replacement故障分支未逐个真实UI重复运行，依赖本候选源码/契约测试及后端动作边界。
+      truncated: false
+    - text: 证据在系统TEMP，需交付方另行保留；本次不清空交易、不关闭专用服务、不清理后台数据。
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-01T10:26:57.801Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: "Builder handoff Runtime checks failed: frontend-check"
+      truncated: false
+    completed_at: 2026-10-01T09:15:42.625Z
+  - goal_cycle: 1
+    iteration: 2
+    attempt: 1
+    outcome: execution-error
+    unresolved_ids: []
+    summary:
+      text: 平台确认独立Verifier /root/verify_multirecord_current_candidate_v6
+        已errored：模型上游HTTP503 Service temporarily
+        unavailable；未自然完成任何正式验收，不是业务失败或根中断。当前候选与Runtime完整检查保持。
+      truncated: false
+    completed_at: 2026-10-01T09:26:47.336Z
+  - goal_cycle: 1
+    iteration: 2
+    attempt: 2
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 全部23项逐项独立判断通过。复用当前候选Runtime typecheck/232
+        tests/build/diff-check有效回执；本次WOW与CAP4K真实UI/HTTP分别完成4/1/3→完整revision2→4/4/0→冻结→唯一SUCCESS结算，历史全对象/原明细不变，净额included汇总27820。补两端UI支付/退款自动刷新、冲突责任处置、timeline/notification/分页/移动视觉及当前paired
+        live
+        2/2。共享时钟已恢复2056-02-10T06:00:00Z。证据见TEMP/verifier-v7-multirecord-http.json、verifier-v7-ui-observations.json、verifier-v7-paired-live-check.json及verifier-v7-*.jpg；源接口投影与未实际故障注入边界列风险，未接受/归档。
+      truncated: false
+    completed_at: 2026-10-01T10:26:57.801Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-01T05:48:19.731Z
