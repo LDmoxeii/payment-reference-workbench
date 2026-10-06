@@ -7,6 +7,8 @@
 
 业务含义以 `payment-product-template` 的 reference learning profile 为准，不以任一后端的 DTO、路由或框架实现为页面标准。两个后端当前覆盖相同的学习版业务范围；HTTP 方法、字段名、header、回执包装、callback evidence 和读模型收敛方式等差异只存在于 adapter/HTTP 边界。
 
+第一次使用可阅读 [业务场景学习手册](./docs/business-learning-scenarios.md)：它解释八个页签、核心表单和按钮，区分手填/核对、自动预填与点击后处理，并按十二个练习列出前置条件、步骤、逐步预期结果和完成判据。
+
 ## 业务地图
 
 工作台围绕三类学习角色组织业务：
@@ -181,11 +183,13 @@ adapter 负责：
 
 ## 支持的业务流程
 
+以下保留能力概要；具体操作见 [业务场景学习手册](./docs/business-learning-scenarios.md)。主线是环境准备、支付、可选退款、完整账单与对账、结算；漏账纠正、差异处置、UNKNOWN、通知、Timeline 和两个可选分支分别有独立练习。
+
 ### 支付
 
 1. 使用 merchant、merchant order、Money、payment method 和 idempotency key 创建 PaymentIntent。
 2. 独立创建 PaymentAttempt，并使用稳定 attempt identity 提交。
-3. 通过 Reference Lab 提交由服务端验证的 `SUCCESS`、`FAILURE` 或 `UNKNOWN` 结果。
+3. 在 Reference Lab 准备渠道脚本，提交 attempt 时消费；或在支付页的结果表单提交由服务端验证的 `SUCCESS`、`FAILURE` 或 `UNKNOWN` 结果。脚本已产生成功事实时无需重复注入成功结果。
 4. 查看 submission/result receipts、Operation、成功事实、费用快照、通知和 timeline。
 5. 复现重复、无效、未知引用、迟到、冲突和到期场景；结果由后端裁决，前端不接受可编辑的 `verified=true`。
 
@@ -205,26 +209,15 @@ Payment、Refund、ReconciliationRun、Settlement 和 ManualReviewItem 使用后
 - 登记 reference 权威账单及不可变 revision，发送 bill available/refresh 信号。
 - 创建或重跑 ReconciliationRun，查看 matching basis、平台事实、账单记录和差异。
 - 对差异提交 `DifferenceDisposition` 或 `FactConfirmation`，保留 actor、reason、evidence 和原始事实。
-- 只有明确结论可以解除相应阻断；未决 blocking difference 阻止完成和结算。
+- 只有明确结论可以解除相应阻断；未决 blocking difference 阻止相应完成或逐笔结算资格。是否可结算以权威候选和原因码判断，不把整个 Run 必须 COMPLETED 当作两端共有的硬前提。
 
-#### 一步步学习：漏账 → 完整新版本 → 结算
+#### 学习入口：漏账 → 完整新版本 → 结算
 
-以同一商户、渠道、币种、业务日期中的三笔各 **100 元成功支付**和其中一笔 **20 元成功退款**为例。数字只是教学示例，请使用自己权威详情里的实际金额、成功外部交易号和时间。若同一天还有其他交易，对账范围可能包含它们；要构造恰好四行的实验，应使用独立业务日或隔离环境。
+在隔离商户、渠道、币种和业务日范围内，可用三笔100元成功支付与一笔20元成功退款演示：旧版只录一笔支付时为4/1/3；查询历史并复制完整版本、补齐四行、发布新revision后，有效新Run为4/4/0。计数只适用于这组独立数据，输入使用本次实际成功事实和外部号。
 
-1. 打开“支付”和“退款”的详情，记录每笔成功交易的渠道外部交易号与发生时间。退款使用渠道退款号，作为独立 `REFUND` 行，不能把它与支付相减后写成一条 80 元支付。业务记录 ID 是账单行的稳定身份，可使用表单生成值；它与外部交易号、平台 Payment/Refund ID 不同。
-2. 进入 **Reference Lab → 多记录账单 revision**。确认共享商户、渠道、`CNY`、业务日期和业务时区。金额输入单位是元，例如 `100.00`，内部按精确最小单位字符串提交。业务日期按所选时区划分，不能直接拿电脑今天的日期代替 reference 逻辑时钟。
-3. 先保留一行 `PAYMENT`，录入第一笔支付的真实外部号、`100.00`、渠道原状态 `SUCCEEDED` 和真实发生时间。点击 **发布完整 immutable revision**，检查确认框中的 Bill ID、revision 和行数，确认发布。
-4. 等待页面显示 **权威回读已确认本版账单**，展开“已发布版本只读证据”查看 revision。只有回读结果才证明本版已经可见；“已受理”与 Operation 完成是独立层次。若读取暂未完成，点击“继续观察同一 Operation”或“继续回读已发布账单”；网络响应丢失时，保持草稿不变并“安全重试同一发布”。编辑发布内容会产生新幂等键，但不能覆盖已经发布的同一 revision。
-5. 点击 **前往对账（核对上下文后手动运行）**。对账页重新查询权威账单，核对 Bill/revision、商户、渠道、币种、业务日期、时区。若账单没有返回商户，必须明确确认本次运行商户，不能把环境商户当成账单的权威归属。按页面动作通知账单可用并创建 `ReconciliationRun`，不必手写 JSON。
-6. 在“对账明细”查看本 Run：此隔离示例应为总明细 **4**、匹配 **1**、真实差异 **3**。切换“全部 / 仅差异 / 仅匹配”只改变可见行。`PLATFORM_ONLY` 表示平台有事实而这版渠道账单没有对应记录；这时结算通常仍被阻断。
-7. 返回 Reference Lab，在 **查询 Bill ID** 填入刚发布的 ID，点击 **查询账单与版本**，选择 revision 1，然后 **复制完整版本为新草稿**。若已有编辑，确认替换。新版本号取权威 `currentRevision + 1`，即使选择更早版本也是如此。整版复制保留原有业务记录 ID、时间、金额和渠道原状态；历史证据不可编辑。
-8. 点击 **添加记录** 补入另两笔 `PAYMENT` 和一笔 `REFUND`，总共四行。也可“复制此行”后修改，它会生成新的业务记录 ID；外部号不会自动变成另一笔交易，必须自行核对。确认四笔都在这份新草稿里，再发布 revision 2。**每个 revision 都是完整快照，不自动累加 revision 1 的记录。** 原版及旧 Run 不变。
-9. 再次前往对账，使用新 revision 创建或重跑有效 Run。权威结果应为匹配 **4**、真实差异 **0**。同时检查“未解决”“阻断明细”及 Run 的结算阻断；`MATCHED` 只表示核对一致，零差异不能替代终态、完整性和结算资格检查。仅当权威动作允许时，按页面显式完成对账（已自动完成的 Run 无需额外动作）。
-10. 进入“结算”，选择同一商户、币种及覆盖实际交易的周期，点击 **准备结算候选**；检查 included/excluded items、原因、收入、退款、费用、调整和净额，再确认冻结。配置 Reference Lab 的结算 executor 脚本，回到结算页执行并查看权威成功。净额以实际费用与调整为准，不能预设是 280 元。
+每个revision都是完整不可变快照，支付与退款分行，版本不累加；日期按Reference逻辑时钟与业务时区核对。WOW通知账单可用后独立创建Run，CAP4K先回读信号可能已产生的Run；MATCHED无需处置，零差异仍检查完整性、阻断和资格。结算按实际候选、费用、调整与净额推进，不预设280元。
 
-如果要学习差异处置，可以故意保留异常并查看双方证据、责任字段、人工核对和追加处置历史；不要为了继续结算把所有差异一律接受。正常 `MATCHED` 行只查看证据，存在权威阻断时按提示核对。
-
-编辑器也保留空账单、零金额、重复外部交易号等 reference 实验，发布前有明确提示；同版重复业务记录 ID、无效金额、无效时间和失真的 revision 会定位到具体字段。新增行使用当前逻辑时钟；环境刷新不会改写手工或历史时间。“同步业务日期与全部行时间”会先确认作用范围。
+完整步骤见手册的 [完整账单与匹配对账](./docs/business-learning-scenarios.md#scenario-04)、[漏账纠正](./docs/business-learning-scenarios.md#scenario-05) 和 [成功结算](./docs/business-learning-scenarios.md#scenario-06)。需要判断真实差异时参照 [责任处置与事实确认](./docs/business-learning-scenarios.md#scenario-07)，不能为了继续结算一律接受差异。编辑器保留额外实验及字段校验，手册不展开边界组合。
 
 工作台表单只接受可精确表示的正整数 revision，最大为 `9007199254740991`。WOW 的公开接口使用 Kotlin Int32，适配器会在发送 HTTP 前拒绝超出 `1–2147483647` 的账单发布、信号、运行、重跑、差异处置及脚本请求，显示 `BILL_REVISION_OUT_OF_RANGE` 和具体范围。CAP4K 使用正整数字符串并由后端以 BigInteger 比较，因此安全整数范围内的大版本仍精确传输，不受 WOW 的 Int32 上限限制；超出前端安全整数范围的已发布版本保留原始文本供查看，不能失真地复制或提交。
 
@@ -339,11 +332,11 @@ $env:LIVE_MULTIRECORD_EVIDENCE_PATH=Join-Path $env:TEMP "multi-record-cap4k-$(Ge
 npm run test -- src/adapters/multi-record-live-smoke.test.ts
 ```
 
-如需为真实页面操作准备事实，将 `LIVE_MULTIRECORD_SEED_ONLY` 设为 `1` 并运行同一命令；此模式只创建支付/退款，输出 `MULTIRECORD_UI_CONTEXT` 以及可选证据文件，随后按上文页面步骤发布、纠正、对账和结算。seed-only 的测试成功不证明账单纠正或结算通过。可用 `LIVE_MULTIRECORD_FIXTURE` 指定专用 fixture，省略时按本次运行标识生成；用 `LIVE_MULTIRECORD_DAY` 指定隔离业务日。不要在共享服务上仅换商户名后重复同一业务日。测试结束后保留证据，关闭专用进程即可；不删除交易，并在运行默认测试前移除上述 `LIVE_*` 环境变量，避免意外再次启用真实命令。
+如需为真实页面操作准备事实，将 `LIVE_MULTIRECORD_SEED_ONLY` 设为 `1` 并运行同一命令；此模式只创建支付/退款，输出 `MULTIRECORD_UI_CONTEXT` 以及可选证据文件，随后按[业务场景学习手册](./docs/business-learning-scenarios.md#scenario-05)发布、纠正、对账和结算。seed-only 的测试成功不证明账单纠正或结算通过。可用 `LIVE_MULTIRECORD_FIXTURE` 指定专用 fixture，省略时按本次运行标识生成；用 `LIVE_MULTIRECORD_DAY` 指定隔离业务日。不要在共享服务上仅换商户名后重复同一业务日。测试结束后保留证据，关闭专用进程即可；不删除交易，并在运行默认测试前移除上述 `LIVE_*` 环境变量，避免意外再次启用真实命令。
 
 2026-10-01，`complete-multi-record-bill-reconciliation` 的当前候选已完成正式独立验收，A1–A23 全部通过。Runtime 类型检查、232 项默认测试、生产构建和 diff-check 通过；4 个默认 skipped 不计通过。本次另执行 paired live 2/2，并分别经真实 WOW/CAP4K UI 与公开 HTTP 完成“revision 1：总 4 / 匹配 1 / 差异 3、阻断 → 完整四行 revision 2：总 4 / 匹配 4 / 差异 0 → 冻结结算 → 唯一成功 execution”。旧版本完整对象与旧 Run 原始明细不变；实际净额为 `300.00 - 20.00 - 1.80 = CNY 278.20`，与纳入构成汇总一致，不能把这个测试值用作其他场景的固定净额。
 
-桌面和 `390 × 844` 移动视口均有本次证据。业务确认由页面内 `ConfirmationHost` 显式处理，验收不需要用户手动点击原生弹窗；先前原生确认控件阻塞只是历史尝试，不再是当前验收状态。正式结果见 [Comet 验收报告](./docs/comet/changes/complete-multi-record-bill-reconciliation/verification.md)，当前等待用户接受，尚未归档。请求响应、UI 观察和截图已从 TEMP 复制到本机独立证据目录，位置与 SHA-256 见视觉验证记录；它们不随 Git 自动分发。
+桌面和 `390 × 844` 移动视口均有本次证据。业务确认由页面内 `ConfirmationHost` 显式处理，验收不需要用户手动点击原生弹窗；先前原生确认控件阻塞只是历史尝试，不再是当前验收状态。该需求已归档，正式结果见 [Comet 验收报告](./docs/comet/archive/2026-10-01-complete-multi-record-bill-reconciliation/verification.md)。请求响应、UI 观察和截图已从 TEMP 复制到本机独立证据目录，位置与 SHA-256 见视觉验证记录；它们不随 Git 自动分发。
 
 已知观察限制仍如实保留：CAP4K 部分 search/ManualReview 源时间投影比详情早 8 小时；通知列表摘要可能显示 0 次投递而权威详情为 1；支付创建后表单可能回到通用 `DEFAULT`，再次创建前应核对环境支付方式（本次为 `CARD`）。涉及时间和投递历史请打开权威详情与源诊断核实。本次没有真实注入网络丢包或进程崩溃，也没有逐个进行所有 callback、负净额、void/replacement 的真实 UI 故障实验；这些边界由当前候选测试与源码核验支持，不冒称现场覆盖。
 
